@@ -398,7 +398,7 @@ def image_to_3d(
         return_latent=True,
     )
     mesh = outputs[0]
-    mesh.simplify(16777216) # nvdiffrast limit
+    mesh.simplify(16777216) # rasterizer vertex limit
     images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
     state = pack_state(latents)
     torch.cuda.empty_cache()

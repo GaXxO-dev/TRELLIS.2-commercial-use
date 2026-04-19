@@ -82,7 +82,7 @@ Data processing is streamlined for instant conversions that are fully **renderin
     
     Create a new conda environment named `trellis2` and install the dependencies:
     ```sh
-    . ./setup.sh --new-env --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+    . ./setup.sh --new-env --basic --flash-attn --drtk --nvdiffrec --cumesh --o-voxel --flexgemm
     ```
     The detailed usage of `setup.sh` can be found by running `. ./setup.sh --help`.
     ```sh
@@ -95,7 +95,7 @@ Data processing is streamlined for instant conversions that are fully **renderin
         --cumesh                Install cumesh
         --o-voxel               Install o-voxel
         --flexgemm              Install flexgemm
-        --nvdiffrast            Install nvdiffrast
+        --drtk                  Install DRTK (differentiable renderer, MIT license)
         --nvdiffrec             Install nvdiffrec
     ```
 
@@ -142,7 +142,7 @@ pipeline.cuda()
 # 3. Load Image & Run
 image = Image.open("assets/example_image/T.png")
 mesh = pipeline.run(image)[0]
-mesh.simplify(16777216) # nvdiffrast limit
+mesh.simplify(16777216) # rasterizer vertex limit
 
 # 4. Render Video
 video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
@@ -315,7 +315,7 @@ This model and code are released under the **[MIT License](LICENSE)**.
 
 Please note that certain dependencies operate under separate license terms:
 
-- [**nvdiffrast**](https://github.com/NVlabs/nvdiffrast): Utilized for rendering generated 3D assets. This package is governed by its own [License](https://github.com/NVlabs/nvdiffrast/blob/main/LICENSE.txt).
+- [**DRTK**](https://github.com/facebookresearch/DRTK): Differentiable rendering toolkit used for rendering generated 3D assets. MIT licensed.
 
 - [**nvdiffrec**](https://github.com/NVlabs/nvdiffrec): Implements the split-sum renderer for PBR materials. This package is governed by its own [License](https://github.com/NVlabs/nvdiffrec/blob/main/LICENSE.txt).
 

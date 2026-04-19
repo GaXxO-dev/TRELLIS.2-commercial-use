@@ -13,7 +13,7 @@
 
 Full setup (new conda env):
 ```sh
-. ./setup.sh --new-env --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+. ./setup.sh --new-env --basic --flash-attn --drtk --nvdiffrec --cumesh --o-voxel --flexgemm
 ```
 
 Creates conda environment `trellis2` with PyTorch 2.6.0 + CUDA 12.4.
@@ -56,7 +56,7 @@ python train.py --config configs/scvae/shape_vae_next_dc_f16c32_fp16.json --outp
 Dataset paths passed as JSON strings. See README for full training pipeline.
 
 ## Dependencies with Separate Licenses
-- `nvdiffrast` — Rendering (own license)
+- `DRTK` — Differentiable rendering toolkit (MIT license)
 - `nvdiffrec` — PBR split-sum renderer (own license)
 
 ## No Tests

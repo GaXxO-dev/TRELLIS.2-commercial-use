@@ -23,7 +23,7 @@ pipeline.cuda()
 # 3. Load Image & Run
 image = Image.open("assets/example_image/T.png")
 mesh = pipeline.run(image)[0]
-mesh.simplify(16777216) # nvdiffrast limit
+mesh.simplify(16777216) # rasterizer vertex limit
 
 # 4. Render Video
 video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))

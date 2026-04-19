@@ -1,5 +1,5 @@
 # Read Arguments
-TEMP=`getopt -o h --long help,new-env,basic,flash-attn,cumesh,o-voxel,flexgemm,nvdiffrast,nvdiffrec -n 'setup.sh' -- "$@"`
+TEMP=`getopt -o h --long help,new-env,basic,flash-attn,cumesh,o-voxel,flexgemm,drtk,nvdiffrec -n 'setup.sh' -- "$@"`
 
 eval set -- "$TEMP"
 
@@ -10,7 +10,7 @@ FLASHATTN=false
 CUMESH=false
 OVOXEL=false
 FLEXGEMM=false
-NVDIFFRAST=false
+DRTK=false
 NVDIFFREC=false
 ERROR=false
 
@@ -28,7 +28,7 @@ while true ; do
         --cumesh) CUMESH=true ; shift ;;
         --o-voxel) OVOXEL=true ; shift ;;
         --flexgemm) FLEXGEMM=true ; shift ;;
-        --nvdiffrast) NVDIFFRAST=true ; shift ;;
+        --drtk) DRTK=true ; shift ;;
         --nvdiffrec) NVDIFFREC=true ; shift ;;
         --) shift ; break ;;
         *) ERROR=true ; break ;;
@@ -50,7 +50,7 @@ if [ "$HELP" = true ] ; then
     echo "  --cumesh                Install cumesh"
     echo "  --o-voxel               Install o-voxel"
     echo "  --flexgemm              Install flexgemm"
-    echo "  --nvdiffrast            Install nvdiffrast"
+    echo "  --drtk                  Install DRTK (differentiable renderer, MIT license)"
     echo "  --nvdiffrec             Install nvdiffrec"
     return
 fi
@@ -100,14 +100,9 @@ if [ "$FLASHATTN" = true ] ; then
     fi
 fi
 
-if [ "$NVDIFFRAST" = true ] ; then
-    if [ "$PLATFORM" = "cuda" ] ; then
-        mkdir -p /tmp/extensions
-        git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
-        pip install /tmp/extensions/nvdiffrast --no-build-isolation
-    else
-        echo "[NVDIFFRAST] Unsupported platform: $PLATFORM"
-    fi
+if [ "$DRTK" = true ] ; then
+    mkdir -p /tmp/extensions
+    pip install git+https://github.com/facebookresearch/DRTK.git
 fi
 
 if [ "$NVDIFFREC" = true ] ; then

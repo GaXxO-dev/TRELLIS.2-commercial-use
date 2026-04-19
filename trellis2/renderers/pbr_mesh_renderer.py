@@ -5,6 +5,7 @@ import numpy as np
 import utils3d
 from ..representations.mesh import Mesh, MeshWithVoxel, MeshWithPbrMaterial, TextureFilterMode, AlphaMode, TextureWrapMode
 import torch.nn.functional as F
+from ..utils.drtk_compat import RasterizeCudaContext, interpolate, texture, DepthPeeler
 
 
 def cube_to_dir(s, x, y):
@@ -18,8 +19,7 @@ def cube_to_dir(s, x, y):
 
 
 def latlong_to_cubemap(latlong_map, res):
-    if 'dr' not in globals():
-        import nvdiffrast.torch as dr
+    """Convert latlong environment map to cubemap using PyTorch grid_sample."""
     cubemap = torch.zeros(6, res[0], res[1], latlong_map.shape[-1], dtype=torch.float32, device='cuda')
     for s in range(6):
         gy, gx = torch.meshgrid(torch.linspace(-1.0 + 1.0 / res[0], 1.0 - 1.0 / res[0], res[0], device='cuda'), 
@@ -31,7 +31,16 @@ def latlong_to_cubemap(latlong_map, res):
         tv = torch.acos(torch.clamp(v[..., 1:2], min=-1, max=1)) / np.pi
         texcoord = torch.cat((tu, tv), dim=-1)
 
-        cubemap[s, ...] = dr.texture(latlong_map[None, ...], texcoord[None, ...], filter_mode='linear')[0]
+        # Use F.grid_sample instead of nvdiffrast's dr.texture
+        # texcoord is in [0, 1], grid_sample expects [-1, 1]
+        grid = texcoord.unsqueeze(0) * 2 - 1
+        cubemap[s, ...] = F.grid_sample(
+            latlong_map.unsqueeze(0), 
+            grid.unsqueeze(0),
+            mode='bilinear',
+            padding_mode='border',
+            align_corners=True
+        )[0]
     return cubemap
 
 
@@ -42,8 +51,7 @@ class EnvMap:
     @property
     def _backend(self):
         if not hasattr(self, '_nvdiffrec_envlight'):
-            if 'EnvironmentLight' not in globals():
-                from nvdiffrec_render.light import EnvironmentLight
+            from nvdiffrec_render.light import EnvironmentLight
             cubemap = latlong_to_cubemap(self.image, [512, 512])
             self._nvdiffrec_envlight = EnvironmentLight(cubemap)
             self._nvdiffrec_envlight.build_mips()
@@ -53,14 +61,36 @@ class EnvMap:
         return self._backend.shade(gb_pos, gb_normal, kd, ks, view_pos, specular)
     
     def sample(self, directions: torch.Tensor):
-        if 'dr' not in globals():
-            import nvdiffrast.torch as dr
-        return dr.texture(
-            self._backend.base.unsqueeze(0),
-            directions.unsqueeze(0),
-            boundary_mode='cube',
-        )[0]
-            
+        """Sample environment map along directions."""
+        # Convert directions to latlong UV coordinates
+        # directions: [N, 3] normalized direction vectors
+        x, y, z = directions[..., 0], directions[..., 1], directions[..., 2]
+        
+        # Latlong mapping: u = atan2(x, -z) / 2pi + 0.5, v = acos(y) / pi
+        # For sampling, we need to handle the coordinate convention
+        # Latlong map has: u=0 at +X direction going counterclockwise, v=0 at +Y (top)
+        
+        # Standard spherical coordinates
+        u = torch.atan2(x, -z) / (2 * np.pi) + 0.5
+        v = torch.acos(torch.clamp(y, min=-1, max=1)) / np.pi
+        
+        # Stack UV coordinates
+        texcoord = torch.stack([u, v], dim=-1)
+        
+        # grid_sample expects [N, H_out, W_out, 2] in [-1, 1]
+        grid = texcoord.unsqueeze(0).unsqueeze(0) * 2 - 1
+        
+        # Sample from latlong map
+        result = F.grid_sample(
+            self.image.unsqueeze(0).permute(0, 3, 1, 2),
+            grid,
+            mode='bilinear',
+            padding_mode='border',
+            align_corners=True
+        )
+        
+        return result[0, ..., 0, :].permute(1, 0)  # [C, N]
+                
 
 def intrinsics_to_projection(
         intrinsics: torch.Tensor,
@@ -128,14 +158,12 @@ def screen_space_ambient_occlusion(
     )
     x_view = (x_grid.float() - cx) * depth[..., 0] / fx
     y_view = (y_grid.float() - cy) * depth[..., 0] / fy
-    view_pos = torch.stack([x_view, y_view, depth[..., 0]], dim=-1) # [H, W, 3]
+    view_pos = torch.stack([x_view, y_view, depth[..., 0]], dim=-1)
     
     depth_feat = depth.permute(2, 0, 1).unsqueeze(0)
     occlusion = torch.zeros((H, W), device=device)
     
-    # start sampling
     for _ in range(samples):
-        # sample normal distribution, if inside, flip the sign
         rnd_vec = torch.randn(H, W, 3, device=device)
         rnd_vec = F.normalize(rnd_vec, p=2, dim=-1)
         dot_val = torch.sum(rnd_vec * normal, dim=-1, keepdim=True)
@@ -145,7 +173,6 @@ def screen_space_ambient_occlusion(
         sample_pos = view_pos + sample_dir * radius * scale
         sample_z = sample_pos[..., 2]
         
-        # project to screen space
         z_safe = torch.clamp(sample_pos[..., 2], min=1e-5)
         proj_u = (sample_pos[..., 0] * fx / z_safe) + cx
         proj_v = (sample_pos[..., 1] * fy / z_safe) + cy
@@ -173,10 +200,7 @@ def aces_tonemapping(x: torch.Tensor) -> torch.Tensor:
     d = 0.59
     e = 0.14
     
-    # Apply the ACES fitted curve
     mapped = (x * (a * x + b)) / (x * (c * x + d) + e)
-    
-    # Clamp to [0, 1] for display or saving
     return torch.clamp(mapped, 0.0, 1.0)
 
 
@@ -195,9 +219,6 @@ class PbrMeshRenderer:
         rendering_options (dict): Rendering options.
         """
     def __init__(self, rendering_options={}, device='cuda'):
-        if 'dr' not in globals():
-            import nvdiffrast.torch as dr
-        
         self.rendering_options = edict({
             "resolution": None,
             "near": None,
@@ -206,7 +227,7 @@ class PbrMeshRenderer:
             "peel_layers": 8,
         })
         self.rendering_options.update(rendering_options)
-        self.glctx = dr.RasterizeCudaContext(device=device)
+        self.glctx = RasterizeCudaContext(device=device)
         self.device=device
         
     def render(
@@ -237,9 +258,6 @@ class PbrMeshRenderer:
                 metallic (torch.Tensor): [H, W] metallic image
                 roughness (torch.Tensor): [H, W] roughness image
         """
-        if 'dr' not in globals():
-            import nvdiffrast.torch as dr
-            
         if not isinstance(envmap, dict):
             envmap = {'' : envmap}
         num_envmaps = len(envmap)
@@ -297,18 +315,19 @@ class PbrMeshRenderer:
         normal = torch.zeros((resolution * ssaa, resolution * ssaa, 3), dtype=torch.float32, device=self.device)
         max_w = torch.zeros((resolution * ssaa, resolution * ssaa, 1), dtype=torch.float32, device=self.device)
         alpha = torch.zeros((resolution * ssaa, resolution * ssaa, 1), dtype=torch.float32, device=self.device)
-        with dr.DepthPeeler(self.glctx, vertices_clip, faces, (resolution * ssaa, resolution * ssaa)) as peeler:
+        
+        with DepthPeeler(self.glctx, vertices_clip, faces, (resolution * ssaa, resolution * ssaa)) as peeler:
             for _ in range(self.rendering_options["peel_layers"]):
                 rast, rast_db = peeler.rasterize_next_layer()
                 
                 # Pos
-                pos = dr.interpolate(vertices, rast, faces)[0][0]
+                pos = interpolate(vertices, rast, faces)[0][0]
                 
                 # Depth
-                gb_depth = dr.interpolate(vertices_camera[..., 2:3].contiguous(), rast, faces)[0][0]
+                gb_depth = interpolate(vertices_camera[..., 2:3].contiguous(), rast, faces)[0][0]
                         
                 # Normal
-                gb_normal = dr.interpolate(face_normal.unsqueeze(0), rast, torch.arange(face_normal.shape[0], dtype=torch.int, device=self.device).unsqueeze(1).repeat(1, 3).contiguous())[0][0]
+                gb_normal = interpolate(face_normal.unsqueeze(0), rast, torch.arange(face_normal.shape[0], dtype=torch.int, device=self.device).unsqueeze(1).repeat(1, 3).contiguous())[0][0]
                 gb_normal = torch.where(
                     torch.sum(gb_normal * (pos - rays_o), dim=-1, keepdim=True) > 0,
                     -gb_normal,
@@ -325,7 +344,7 @@ class PbrMeshRenderer:
                     if 'grid_sample_3d' not in globals():
                         from flex_gemm.ops.grid_sample import grid_sample_3d
                     mask = rast[..., -1:] > 0
-                    xyz = dr.interpolate(vertices_orig, rast, faces)[0]
+                    xyz = interpolate(vertices_orig, rast, faces)[0]
                     xyz = ((xyz - mesh.origin) / mesh.voxel_size).reshape(1, -1, 3)
                     img = grid_sample_3d(
                         mesh.attrs,
@@ -340,21 +359,19 @@ class PbrMeshRenderer:
                     gb_roughness = img[0, ..., mesh.layout['roughness']]
                     gb_alpha = img[0, ..., mesh.layout['alpha']]
                 elif isinstance(mesh, MeshWithPbrMaterial):
-                    tri_id = rast[0, :, :, -1:]
+                    tri_id = rast[0, ..., -1:]
                     mask = tri_id > 0
                     uv_coords = mesh.uv_coords.reshape(1, -1, 2)
-                    texc, texd = dr.interpolate(
+                    texc, texd = interpolate(
                         uv_coords,
                         rast,
                         torch.arange(mesh.uv_coords.shape[0] * 3, dtype=torch.int, device=self.device).reshape(-1, 3),
                         rast_db=rast_db,
-                        diff_attrs='all'
                     )
-                    # Fix problematic texture coordinates
                     texc = torch.nan_to_num(texc, nan=0.0, posinf=1e3, neginf=-1e3)
                     texc = torch.clamp(texc, min=-1e3, max=1e3)
-                    texd = torch.nan_to_num(texd, nan=0.0, posinf=1e3, neginf=-1e3)
-                    texd = torch.clamp(texd, min=-1e3, max=1e3)
+                    texd = torch.nan_to_num(texd, nan=0.0, posinf=1e3, neginf=-1e3) if texd is not None else None
+                    texd = torch.clamp(texd, min=-1e3, max=1e3) if texd is not None else None
                     mid = mesh.material_ids[(tri_id - 1).long()]
                     gb_basecolor = torch.zeros((resolution * ssaa, resolution * ssaa, 3), dtype=torch.float32, device=self.device)
                     gb_metallic = torch.zeros((resolution * ssaa, resolution * ssaa, 1), dtype=torch.float32, device=self.device)
@@ -363,10 +380,10 @@ class PbrMeshRenderer:
                     for id, mat in enumerate(mesh.materials):
                         mat_mask = (mid == id).float() * mask.float()
                         mat_texc = texc * mat_mask
-                        mat_texd = texd * mat_mask
+                        mat_texd = texd * mat_mask if texd is not None else None
 
                         if mat.base_color_texture is not None:
-                            bc = dr.texture(
+                            bc = texture(
                                 mat.base_color_texture.image.unsqueeze(0),
                                 mat_texc,
                                 mat_texd,
@@ -378,7 +395,7 @@ class PbrMeshRenderer:
                             gb_basecolor += mat.base_color_factor * mat_mask
                             
                         if mat.metallic_texture is not None:
-                            m = dr.texture(
+                            m = texture(
                                 mat.metallic_texture.image.unsqueeze(0),
                                 mat_texc,
                                 mat_texd,
@@ -390,7 +407,7 @@ class PbrMeshRenderer:
                             gb_metallic += mat.metallic_factor * mat_mask
 
                         if mat.roughness_texture is not None:
-                            r = dr.texture(
+                            r = texture(
                                 mat.roughness_texture.image.unsqueeze(0),
                                 mat_texc,
                                 mat_texd,
@@ -405,7 +422,7 @@ class PbrMeshRenderer:
                             gb_alpha += 1.0 * mat_mask
                         else:
                             if mat.alpha_texture is not None:
-                                a = dr.texture(
+                                a = texture(
                                     mat.alpha_texture.image.unsqueeze(0),
                                     mat_texc,
                                     mat_texd,
@@ -457,7 +474,7 @@ class PbrMeshRenderer:
                 shaded += w * gb_shaded
                 alpha += w
         
-        # Ambient occulusion
+        # Ambient occlusion
         f_occ = screen_space_ambient_occlusion(
             depth, normal, perspective, intensity=1.5
         )

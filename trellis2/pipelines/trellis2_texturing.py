@@ -10,9 +10,9 @@ from ..modules.sparse import SparseTensor
 from ..modules import image_feature_extractor
 import o_voxel
 import cumesh
-import nvdiffrast.torch as dr
-import cv2
 import flex_gemm
+from ..utils.drtk_compat import RasterizeCudaContext, interpolate
+import cv2
 
 
 class Trellis2TexturingPipeline(Pipeline):
@@ -123,7 +123,6 @@ class Trellis2TexturingPipeline(Pipeline):
         """
         Preprocess the input image.
         """
-        # if has alpha channel, use it directly; otherwise, remove background
         has_alpha = False
         if input.mode == 'RGBA':
             alpha = np.array(input)[:, :, 3]
@@ -150,7 +149,7 @@ class Trellis2TexturingPipeline(Pipeline):
         size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
         size = int(size * 1)
         bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
-        output = output.crop(bbox)  # type: ignore
+        output = output.crop(bbox)
         output = np.array(output).astype(np.float32) / 255
         output = output[:, :, :3] * output[:, :, 3:4]
         output = Image.fromarray((output * 255).astype(np.uint8))
@@ -236,7 +235,6 @@ class Trellis2TexturingPipeline(Pipeline):
             shape_slat (SparseTensor): The structured latent for shape
             sampler_params (dict): Additional parameters for the sampler.
         """
-        # Sample structured latent
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(shape_slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(shape_slat.device)
         shape_slat = (shape_slat - mean) / std
@@ -312,15 +310,15 @@ class Trellis2TexturingPipeline(Pipeline):
             uvs = uvs_torch.cpu().numpy()
             normals = normals[vmap.cpu().numpy()]
                 
-        # rasterize
-        ctx = dr.RasterizeCudaContext()
-        uvs_torch = torch.cat([uvs_torch * 2 - 1, torch.zeros_like(uvs_torch[:, :1]), torch.ones_like(uvs_torch[:, :1])], dim=-1).unsqueeze(0)
-        rast, _ = dr.rasterize(
-            ctx, uvs_torch, faces_torch,
-            resolution=[texture_size, texture_size],
-        )
+        # Rasterize using DRTK compatibility layer
+        ctx = RasterizeCudaContext()
+        # UV coordinates need to be in clip space format for the compatibility layer
+        # nvdiffrast expects: [u*2-1, v*2-1, 0, 1] for clip space
+        uvs_clip = torch.cat([uvs_torch * 2 - 1, torch.zeros_like(uvs_torch[:, :1]), torch.ones_like(uvs_torch[:, :1])], dim=-1).unsqueeze(0)
+        rast, _ = ctx.rasterize(uvs_clip, faces_torch, resolution=[texture_size, texture_size])
+        
         mask = rast[0, ..., 3] > 0
-        pos = dr.interpolate(vertices_torch.unsqueeze(0), rast, faces_torch)[0][0]
+        pos = interpolate(vertices_torch.unsqueeze(0), rast, faces_torch)[0][0]
         
         attrs = torch.zeros(texture_size, texture_size, pbr_voxel.shape[1], device=self.device)
         attrs[mask] = flex_gemm.ops.grid_sample.grid_sample_3d(
@@ -331,14 +329,14 @@ class Trellis2TexturingPipeline(Pipeline):
             mode='trilinear',
         )
         
-        # construct mesh
+        # Construct mesh
         mask = mask.cpu().numpy()
         base_color = np.clip(attrs[..., self.pbr_attr_layout['base_color']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         metallic = np.clip(attrs[..., self.pbr_attr_layout['metallic']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         roughness = np.clip(attrs[..., self.pbr_attr_layout['roughness']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         alpha = np.clip(attrs[..., self.pbr_attr_layout['alpha']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         
-        # extend
+        # Extend
         mask = (~mask).astype(np.uint8)
         base_color = cv2.inpaint(base_color, mask, 3, cv2.INPAINT_TELEA)
         metallic = cv2.inpaint(metallic, mask, 1, cv2.INPAINT_TELEA)[..., None]
@@ -358,7 +356,7 @@ class Trellis2TexturingPipeline(Pipeline):
         # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
         vertices[:, 1], vertices[:, 2] = vertices[:, 2], -vertices[:, 1]
         normals[:, 1], normals[:, 2] = normals[:, 2], -normals[:, 1]
-        uvs[:, 1] = 1 - uvs[:, 1] # Flip UV V-coordinate
+        uvs[:, 1] = 1 - uvs[:, 1]  # Flip UV V-coordinate
         
         textured_mesh = trimesh.Trimesh(
             vertices=vertices,
