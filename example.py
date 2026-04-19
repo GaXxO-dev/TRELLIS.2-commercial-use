@@ -6,7 +6,7 @@ import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.utils import render_utils
+from trellis2.utils import render_utils, glb_utils
 from trellis2.renderers import EnvMap
 import o_voxel
 
@@ -45,4 +45,4 @@ glb = o_voxel.postprocess.to_glb(
     remesh_project      =   0,
     verbose             =   True
 )
-glb.export("sample.glb", extension_webp=True)
+glb_utils.export_glb_fixed(glb, "sample.glb", extension_webp=True)

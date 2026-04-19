@@ -15,7 +15,7 @@ import io
 from trellis2.modules.sparse import SparseTensor
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.renderers import EnvMap
-from trellis2.utils import render_utils
+from trellis2.utils import render_utils, glb_utils
 import o_voxel
 
 
@@ -509,7 +509,7 @@ def extract_glb(
     timestamp = now.strftime("%Y-%m-%dT%H%M%S") + f".{now.microsecond // 1000:03d}"
     os.makedirs(user_dir, exist_ok=True)
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
-    glb.export(glb_path, extension_webp=True)
+    glb_utils.export_glb_fixed(glb, glb_path, extension_webp=True)
     torch.cuda.empty_cache()
     return glb_path, glb_path
 

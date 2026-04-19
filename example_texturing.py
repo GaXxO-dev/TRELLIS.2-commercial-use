@@ -3,6 +3,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save G
 import trimesh
 from PIL import Image
 from trellis2.pipelines import Trellis2TexturingPipeline
+from trellis2.utils import glb_utils
 
 # 1. Load Pipeline
 pipeline = Trellis2TexturingPipeline.from_pretrained("microsoft/TRELLIS.2-4B", config_file="texturing_pipeline.json")
@@ -14,4 +15,4 @@ image = Image.open("assets/example_texturing/image.webp")
 output = pipeline.run(mesh, image)
 
 # 3. Render Mesh
-output.export("textured.glb", extension_webp=True)
+glb_utils.export_glb_fixed(output, "textured.glb", extension_webp=True)

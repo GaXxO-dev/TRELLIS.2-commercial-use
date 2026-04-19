@@ -10,6 +10,7 @@ import numpy as np
 import trimesh
 from PIL import Image
 from trellis2.pipelines import Trellis2TexturingPipeline
+from trellis2.utils import glb_utils
 
 
 MAX_SEED = np.iinfo(np.int32).max
@@ -82,7 +83,7 @@ def shapeimage_to_tex(
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     os.makedirs(user_dir, exist_ok=True)
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
-    output.export(glb_path, extension_webp=True)
+    glb_utils.export_glb_fixed(output, glb_path, extension_webp=True)
     torch.cuda.empty_cache()
     return glb_path, glb_path
 
