@@ -1,7 +1,7 @@
 import warnings
 warnings.filterwarnings("ignore", message="Importing from timm.models.layers is deprecated")
 warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated")
-warnings.filterwarnings("ignore", message="torch.cuda.amp.autocast.*is deprecated")
+warnings.filterwarnings("ignore", message="`torch.cuda.amp.autocast")
 
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
