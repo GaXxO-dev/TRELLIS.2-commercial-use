@@ -290,6 +290,11 @@ def interpolate(
     
     result = result.permute(0, 2, 3, 1)
     
+    # Zero out background pixels (where index_img == -1)
+    # This matches nvdiffrast's behavior
+    bg_mask = (index_img < 0).unsqueeze(-1).expand_as(result)
+    result = torch.where(bg_mask, torch.zeros_like(result), result)
+    
     if is_debug_enabled():
         step = next_step()
         dbg_tensor(step, "DRTK_interp_final_result", result)
