@@ -1,0 +1,363 @@
+================================================================================
+PLANNING: DRTK FORK FIX & VERIFICATION
+================================================================================
+
+This document guides an AI agent through fixing issues in the TRELLIS.2 
+DRTK fork by comparing with the official nvdiffrast implementation.
+
+PROJECTS:
+  - Fork (DRTK):     ~/Documents/AI/TRELLIS.2-commercial-use
+  - Official (nvdiffrast): ~/Documents/AI/TRELLIS.2
+
+CONDA ENVIRONMENTS:
+  - Fork:     conda run -n trellis2
+  - Official: conda run -n trellis2-official
+
+================================================================================
+CRITICAL: ALWAYS READ THIS FILE
+================================================================================
+
+When you compact/summarize a session (due to context limits), you MUST:
+  1. Read this planning.txt file FIRST to understand current state
+  2. Read potential_issues.txt to see what's fixed vs pending
+  3. Continue from where you left off
+
+================================================================================
+TESTING METHODOLOGY
+================================================================================
+
+## Running Tests
+
+Fork (DRTK):
+  cd ~/Documents/AI/TRELLIS.2-commercial-use
+  TRELLIS_DEBUG=1 conda run -n trellis2 python test_render_mesh.py 2>&1 | tee test_output/debug_fork.log
+
+Official (nvdiffrast) - ONLY FOR REFERENCE, DON'T MODIFY:
+  cd ~/Documents/AI/TRELLIS.2
+  TRELLIS_DEBUG=1 conda run -n trellis2-official python test_render_mesh.py 2>&1 | tee test_output/debug_official.log
+
+## Compare Outputs
+
+  cd ~/Documents/AI/TRELLIS.2-commercial-use
+  python compare_debug.py
+
+## Key Files to Monitor
+
+  - test_output/debug_fork.log     - Terminal output with stats
+  - test_output/debug/*.npy        - Saved tensor files
+  - test_output/normal_00.png      - Rendered normal map (visual check)
+  - test_output/depth_00.png      - Rendered depth map (visual check)
+  - potential_issues.txt           - Tracked issues (update after each fix)
+
+================================================================================
+GIT WORKFLOW
+================================================================================
+
+After fixing an issue:
+  1. git add -A
+  2. git commit -m "fix: description of what was fixed"
+  3. Test: run test_render_mesh.py and compare_debug.py
+  4. If tests pass, move to next issue
+  5. If tests fail, investigate and fix, or if stuck:
+     git reset --hard HEAD~1  # Undo last commit, try another approach
+
+IMPORTANT: 
+  - NEVER push to remote (only local commits)
+  - Each issue fix = one commit
+  - Commit messages should be descriptive
+
+================================================================================
+PHASE 1: PIPELINE DETERMINISM FIX
+================================================================================
+
+STATUS: PENDING
+
+ISSUE:
+  Both projects use seed=42, but the sparse structure sampling produces 
+  different results. The fork generates ~1,112 voxels vs ~3,540 voxels in
+  official, leading to 3.8x smaller meshes.
+
+ROOT CAUSE:
+  Random number generator state differs before torch.manual_seed(42) is set.
+  Import order and warning filters in the fork affect global state.
+
+FILES TO CHECK:
+  - test_render_mesh.py (both projects) - seed setting location
+  - trellis2/pipelines/trellis2_image_to_3d.py - where seed is used
+
+FIX APPROACH:
+  1. Move seed setting to the VERY FIRST lines in test_render_mesh.py
+     before ANY other imports
+  2. Set deterministic flags:
+     ```python
+     import torch
+     torch.manual_seed(42)
+     torch.cuda.manual_seed_all(42)
+     torch.backends.cudnn.deterministic = True
+     torch.backends.cudnn.benchmark = False
+     ```
+  3. DO NOT set torch.use_deterministic_algorithms(True) - it may break ops
+
+VERIFICATION:
+  1. Run both tests with seed=42
+  2. Compare P2_ss_z_s_sampled.npy - should be identical
+  3. Compare P4_ss_coords.npy - should have same shape
+  4. Compare P10_final_mesh_*.npy - should have same shapes
+
+SUCCESS CRITERIA:
+  - Both produce identical P2_ss_z_s_sampled.npy tensors
+  - Both produce same P4_ss_coords.npy shape (same number of voxels)
+  - Mesh vertex/face counts match within 1%
+
+================================================================================
+PHASE 2: DRTK RASTERIZE VERIFICATION (once Phase 1 passes)
+================================================================================
+
+STATUS: PENDING
+
+CONTEXT:
+  Once meshes are identical, verify DRTK's rasterize() produces correct output.
+
+KEY FILES:
+  - trellis2/utils/drtk_compat.py - DRTKContext.rasterize()
+  - Official: Uses nvdiffrast.torch.rasterize() directly
+
+VERIFICATION CHECKS:
+
+1. Input vertices_clip should be identical (same mesh, same camera)
+   - Compare R11_vertices_clip.npy vs NVR_R11_vertices_clip.npy
+   - Should match exactly (same values, same shapes)
+
+2. DRTK pixel-space conversion
+   - In drtk_compat.py rasterize(), check the conversion from clip-space
+     to pixel-space:
+     - x_ndc = vertices_clip[..., 0] / w_clip
+     - y_ndc = -vertices_clip[..., 1] / w_clip  
+     - x_pix = (x_ndc + 1) * 0.5 * W - 0.5
+     - y_pix = (y_ndc + 1) * 0.5 * H - 0.5
+   - Verify z_cam = vertices_clip[..., 3] (not z_ndc!)
+
+3. DRTK output format
+   - drtk.rasterize returns (index_img, ) with triangle indices
+   - drtk.render returns (depth, bary) with separate outputs
+   - We reconstruct rast[..., 0] = bary[0, 1] (u = weight for vertex 1)
+   - We reconstruct rast[..., 1] = bary[0, 2] (v = weight for vertex 2)
+   - We reconstruct rast[..., 2] = depth[0] (camera-space depth)
+   - We reconstruct rast[..., 3] = index_img[0] + 1 (1-indexed tri ID)
+
+POTENTIAL BUGS TO WATCH:
+  - Check if barycentric weight convention matches: DRTK's w0,w1,w2 
+    should map to nvdiffrast's 1-u-v, u, v
+  - Depth value: nvdiffrast stores z/w in clip-space, DRTK stores z_cam
+    - These are DIFFERENT! z_cam = w_clip (the w component), z/w = z_clip/w_clip
+  - Background handling: nvdiffrast returns -1 for background, DRTK returns -1
+
+DEBUG COMMANDS:
+  # Compare rasterizer inputs
+  python -c "
+  import numpy as np
+  fork = np.load('test_output/debug/11_R11_vertices_clip.npy')
+  official = np.load('test_output_official/debug/11_NVR_R11_vertices_clip.npy')
+  print(f'Fork shape: {fork.shape}, Official shape: {official.shape}')
+  print(f'Fork min/max z: {fork[...,2].min():.4f}/{fork[...,2].max():.4f}')
+  print(f'Official min/max z: {official[...,2].min():.4f}/{official[...,2].max():.4f}')
+  "
+
+SUCCESS CRITERIA:
+  - Input vertices_clip shapes match
+  - DRTK rasterize produces valid index_img (non-negative where geometry exists)
+  - Barycentric coordinates u,v are in [0,1] and sum ≤ 1
+  - Coverage percentage (pixels with geometry) is similar to official
+
+================================================================================
+PHASE 3: DRTK INTERPOLATE VERIFICATION
+================================================================================
+
+STATUS: PENDING
+
+CONTEXT:
+  Verify the interpolate() function in drtk_compat.py correctly interpolates
+  vertex attributes using DRTK's output.
+
+KEY FILES:
+  - trellis2/utils/drtk_compat.py - interpolate()
+
+VERIFICATION CHECKS:
+
+1. The interpolate function should use cached bary_img from rasterize()
+   - Check DRTK_interp_bary_img.npy has values in [0,1]
+
+2. drtk.interpolate() signature:
+   - Takes (attr, faces, index_img, bary_img)
+   - attr: [1, V, C] vertex attributes
+   - faces: [F, 3] face indices
+   - index_img: [1, H, W] triangle indices per pixel
+   - bary_img: [1, 3, H, W] barycentric weights
+
+3. Output permutation:
+   - DRTK returns [1, C, H, W]
+   - We permute to [1, H, W, C] for nvdiffrast compatibility
+
+POTENTIAL BUGS:
+  - Make sure bary_img comes from the rasterize call, not reconstructed
+  - The permutation .permute(0, 2, 3, 1) must happen AFTER drtk.interpolate()
+  - Check that face indices for normal interpolation use:
+    torch.arange(num_faces).unsqueeze(1).repeat(1, 3) for per-face attributes
+
+SUCCESS CRITERIA:
+  - Interpolated normals (R17_interpolated_normal_raw.npy) have reasonable 
+    range [-1, 1] for visible pixels
+  - Interpolated depth (R16_interpolated_depth.npy) has values matching 
+    z_camera (not z/w!)
+
+================================================================================
+PHASE 4: COORDINATE SYSTEM VERIFICATION
+================================================================================
+
+STATUS: PENDING
+
+KEY CHECKPOINT:
+  Depth values in nvdiffrast vs DRTK are DIFFERENT by convention:
+  
+  nvdiffrast rast[..., 2] = z_clip / w_clip (normalized device depth)
+  DRTK depth = z_camera (camera-space distance from camera)
+
+RELATIONSHIP:
+  - nvdiffrast depth ∈ [near_z_plane, far_z_plane] after projection
+  - DRTK depth ∈ [near_clip, far_clip] in camera units
+  - For perspective projection: z_ndc = (far*near - 2*far*near/z_cam) / (far-near)
+
+CURRENT OBSERVATION:
+  Fork depth range:    [9.66, 10.17]  (camera-space z)
+  Official depth range: [0.81, 0.82]  (normalized depth z/w)
+
+These are BOTH CORRECT for their respective conventions! The values differ
+because they measure different things. What matters is:
+  - Depth ordering is preserved (closer = smaller depth in both)
+  - Barycentric interpolation is correct
+
+VERIFICATION:
+  - Check that closer geometry has smaller depth in both implementations
+  - Verify depth ordering matches between fork and official
+
+================================================================================
+PHASE 5: FULL RENDER PIPELINE VERIFICATION
+================================================================================
+
+STATUS: PENDING
+
+After all phases pass, run full comparison:
+
+1. Generate same mesh with same seed (Phase 1 must pass)
+2. Render with both projects using MeshRenderer (normal/depth/mask)
+3. Compare rendered images:
+   - normal_00.png should be visually similar
+   - depth_00.png should show similar structure (values differ due to convention)
+   - mask_00.png should have similar coverage (% of foreground pixels)
+
+4. Numerical comparison of rasterized output:
+   - Use compare_debug.py to check rast stats
+   - Coverage should be within ~10% of each other
+   - Triangle ID ranges should be similar (adjusted for different mesh size)
+
+SUCCESS CRITERIA:
+  - Mesh shapes match (same vertex/face counts)
+  - Render output normal maps are visually similar
+  - Depth ordering is preserved (closer = smaller depth)
+
+================================================================================
+TROUBLESHOOTING GUIDE
+================================================================================
+
+## If meshes don't match after Phase 1:
+  - Check torch.__version__ in both environments
+  - Check CUDA version: torch.version.cuda
+  - Check if model files are identical (compare file sizes or md5sum)
+  - Set more aggressive deterministic flags
+
+## If rasterize produces empty output:
+  - Check if vertices_clip has reasonable range (not all NaN or Inf)
+  - Verify faces tensor is int32 or int64
+  - Check if the mesh has non-zero vertices/faces
+
+## If depth values seem wrong:
+  - Remember DRTK uses camera-space depth, nvdiffrast uses z/w
+  - Verify vertices_camera is computed correctly before projection
+
+## If barycentric coords are outside [0,1]:
+  - This may be normal for pixels outside triangle (background)
+  - Check only on pixels where rast[..., 3] > 0 (inside geometry)
+
+## If interpolate fails:
+  - Verify index_img contains valid triangle indices (not all -1)
+  - Check bary_img has correct shape [1, 3, H, W]
+  - Ensure attr tensor shape matches faces indexing
+
+================================================================================
+IMPORTANT REMINDERS
+================================================================================
+
+1. ONLY modify files in the FORK. Official project is REFERENCE ONLY.
+
+2. ALWAYS read potential_issues.txt at start of each session.
+
+3. ALWAYS update potential_issues.txt:
+   - Add newly discovered issues
+   - Remove issues after fixing them
+   - Mark status (PENDING, IN_PROGRESS, FIXED)
+
+4. Use the correct conda environment:
+   - Fork:     conda run -n trellis2 ...
+   - Official: conda run -n trellis2-official ... (REFERENCE ONLY)
+
+5. The official nvdiffrast implementation is in:
+   - ~/Documents/AI/TRELLIS.2/trellis2/renderers/mesh_renderer.py
+   - For reference, compare DRTK API to nvdiffrast API
+
+6. Git commits after each fix, NEVER push.
+
+7. **DRTK Documentation** - USE THESE RESOURCES:
+   - API Reference: https://drtk.xyz/api_reference/index.html
+     - Check rasterize() and render() function signatures
+     - Check interpolate() function signature and output format
+   - Tutorials: https://drtk.xyz/tutorials/index.html
+     - Read relevant tutorials for mesh rendering
+     - Check coordinate system conventions
+
+================================================================================
+DRTK REFERENCE GUIDE
+================================================================================
+
+When fixing DRTK-related issues, consult:
+
+1. **API Reference**: https://drtk.xyz/api_reference/index.html
+   - drtk.rasterize(vertices, faces, height, width) -> index_img
+   - drtk.render(vertices, faces, index_img) -> (depth, bary)
+   - drtk.interpolate(attr, faces, index_img, bary) -> result
+
+2. **Key Tutorials**:
+   - https://drtk.xyz/tutorials/mesh_rendering.html (if exists)
+   - https://drtk.xyz/tutorials/coordinate_systems.html (if exists)
+   - Check tutorial index for relevant topics
+
+3. **Important API Differences from nvdiffrast**:
+   
+   nvdiffrast:
+     dr.rasterize(glctx, vertices_clip, faces, (H, W)) -> (rast, rast_db)
+     dr.interpolate(attr, rast, faces) -> (result, derivs)
+     dr.texture(tex, uv, uv_da) -> (result, derivs)
+   
+   DRTK:
+     drtk.rasterize(v_pix, faces, height, width) -> index_img
+     drtk.render(v_pix, faces, index_img) -> (depth, bary)
+     drtk.interpolate(attr, faces, index_img, bary) -> result
+     drtk.mipmap_grid_sample(mipmaps, uv, jacobian) -> result
+
+4. **Coordinate Conventions**:
+   - nvdiffrast: clip-space [N, V, 4] with perspective division
+   - DRTK: pixel-space [N, V, 3] with (x, y, z_camera)
+   - Conversion in drtk_compat.py lines ~155-165
+
+================================================================================
+END OF PLANNING
+================================================================================

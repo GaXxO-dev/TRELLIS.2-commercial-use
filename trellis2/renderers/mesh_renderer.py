@@ -3,7 +3,8 @@ import torch
 from easydict import EasyDict as edict
 from ..representations.mesh import Mesh, MeshWithVoxel, MeshWithPbrMaterial, TextureFilterMode, AlphaMode, TextureWrapMode
 import torch.nn.functional as F
-from ..utils.drtk_compat import RasterizeCudaContext, interpolate, texture, antialias
+from ..utils.drtk_compat import RasterizeCudaContext, interpolate, texture, antialias as antialias_fn
+from ..utils.debug_utils import is_debug_enabled, dbg_tensor, dbg_value, dbg_rast_stats, next_step
 
 
 def intrinsics_to_projection(
@@ -87,6 +88,11 @@ class MeshRenderer:
         antialias = self.rendering_options["antialias"]
         clamp_barycentric_coords = self.rendering_options["clamp_barycentric_coords"]
         
+        if is_debug_enabled():
+            dbg_value(next_step(), "R1_resolution", resolution)
+            dbg_value(next_step(), "R2_near_far", f"near={near} far={far}")
+            dbg_value(next_step(), "R3_ssaa_chunk", f"ssaa={ssaa} chunk_size={chunk_size}")
+        
         if mesh.vertices.shape[0] == 0 or mesh.faces.shape[0] == 0:
             ret_dict = edict()
             for type in return_types:
@@ -105,19 +111,39 @@ class MeshRenderer:
                         ret_dict[type] = torch.zeros((mesh.vertex_attrs.shape[-1], resolution, resolution), dtype=torch.float32, device=self.device)
             return ret_dict
         
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "R4_extrinsics", extrinsics, save=False)
+            dbg_tensor(next_step(), "R5_intrinsics", intrinsics, save=False)
+        
         perspective = intrinsics_to_projection(intrinsics, near, far)
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "R6_perspective_matrix", perspective, save=False)
         
         full_proj = (perspective @ extrinsics).unsqueeze(0)
         extrinsics = extrinsics.unsqueeze(0)
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "R7_full_proj_matrix", full_proj[0], save=False)
         
         vertices = mesh.vertices.unsqueeze(0)
         vertices_homo = torch.cat([vertices, torch.ones_like(vertices[..., :1])], dim=-1)
         if transformation is not None:
             vertices_homo = torch.bmm(vertices_homo, transformation.unsqueeze(0).transpose(-1, -2))
             vertices = vertices_homo[..., :3].contiguous()
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "R8_vertices_input", vertices[0])
+        
         vertices_camera = torch.bmm(vertices_homo, extrinsics.transpose(-1, -2))
         vertices_clip = torch.bmm(vertices_homo, full_proj.transpose(-1, -2))
         faces = mesh.faces
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "R9_vertices_homo", vertices_homo[0], save=False)
+            dbg_tensor(next_step(), "R10_vertices_camera", vertices_camera[0])
+            dbg_tensor(next_step(), "R11_vertices_clip", vertices_clip[0])
+            dbg_tensor(next_step(), "R12_faces", faces)
         
         if 'normal' in return_types:
             v0 = vertices_camera[0, mesh.faces[:, 0], :3]
@@ -128,12 +154,22 @@ class MeshRenderer:
             face_normal = torch.cross(e0, e1, dim=1)
             face_normal = F.normalize(face_normal, dim=1)
             face_normal = torch.where(torch.sum(face_normal * v0, dim=1, keepdim=True) > 0, face_normal, -face_normal)
+            
+            if is_debug_enabled():
+                dbg_tensor(next_step(), "R13_face_normals", face_normal, save=False)
         
         out_dict = edict()
         if chunk_size is None:
             rast, rast_db = self.glctx.rasterize(
                 vertices_clip, faces, (resolution * ssaa, resolution * ssaa)
             )
+            
+            if is_debug_enabled():
+                step = next_step()
+                dbg_tensor(step, "R14_rast_output", rast)
+                dbg_rast_stats(step, rast, "R14_rast")
+                dbg_tensor(step, "R15_rast_db", rast_db, save=False)
+            
             if clamp_barycentric_coords:
                 rast[..., :2] = torch.clamp(rast[..., :2], 0, 1)
                 rast[..., :2] /= torch.where(rast[..., :2].sum(dim=-1, keepdim=True) > 1, rast[..., :2].sum(dim=-1, keepdim=True), torch.ones_like(rast[..., :2]))
@@ -141,17 +177,29 @@ class MeshRenderer:
                 img = None
                 if type == "mask" :
                     img = (rast[..., -1:] > 0).float()
-                    if antialias: img = antialias(img, rast, vertices_clip, faces)
+                    if antialias: img = antialias_fn(img, rast, vertices_clip, faces)
                 elif type == "depth":
                     img = interpolate(vertices_camera[..., 2:3].contiguous(), rast, faces, ctx=self.glctx)[0]
-                    if antialias: img = antialias(img, rast, vertices_clip, faces)
+                    if antialias: img = antialias_fn(img, rast, vertices_clip, faces)
+                    
+                    if is_debug_enabled():
+                        dbg_tensor(next_step(), "R16_interpolated_depth", img)
+                        
                 elif type == "normal" :
                     img = interpolate(face_normal.unsqueeze(0), rast, torch.arange(face_normal.shape[0], dtype=torch.int, device=self.device).unsqueeze(1).repeat(1, 3).contiguous(), ctx=self.glctx)[0]
-                    if antialias: img = antialias(img, rast, vertices_clip, faces)
+                    
+                    if is_debug_enabled():
+                        dbg_tensor(next_step(), "R17_interpolated_normal_raw", img)
+                    
+                    if antialias: img = antialias_fn(img, rast, vertices_clip, faces)
                     img = (img + 1) / 2
+                    
+                    if is_debug_enabled():
+                        dbg_tensor(next_step(), "R17_interpolated_normal_final", img)
+                        
                 elif type == "coord":
                     img = interpolate(vertices, rast, faces, ctx=self.glctx)[0]
-                    if antialias: img = antialias(img, rast, vertices_clip, faces)
+                    if antialias: img = antialias_fn(img, rast, vertices_clip, faces)
                 elif type == "attr":
                     if isinstance(mesh, MeshWithVoxel):
                         if 'grid_sample_3d' not in globals():
@@ -254,7 +302,7 @@ class MeshRenderer:
                         img = torch.cat([imgs[name] for name in imgs.keys()], dim=-1).unsqueeze(0)
                     else:
                         img = interpolate(mesh.vertex_attrs.unsqueeze(0), rast, faces)[0]
-                        if antialias: img = antialias(img, rast, vertices_clip, faces)
+                        if antialias: img = antialias_fn(img, rast, vertices_clip, faces)
                         
                 out_dict[type] = img
         else:

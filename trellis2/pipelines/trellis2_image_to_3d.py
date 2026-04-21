@@ -8,6 +8,7 @@ from . import samplers, rembg
 from ..modules.sparse import SparseTensor
 from ..modules import image_feature_extractor
 from ..representations import Mesh, MeshWithVoxel
+from ..utils.debug_utils import is_debug_enabled, dbg_tensor, dbg_value, next_step
 
 
 class Trellis2ImageTo3DPipeline(Pipeline):
@@ -208,6 +209,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         reso = flow_model.resolution
         in_channels = flow_model.in_channels
         noise = torch.randn(num_samples, in_channels, reso, reso, reso).to(self.device)
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P1_ss_noise", noise)
+            dbg_value(next_step(), "P1_ss_resolution", f"{resolution}, model_reso={reso}, in_channels={in_channels}")
+        
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
@@ -222,6 +228,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             flow_model.cpu()
         
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P2_ss_z_s_sampled", z_s)
+        
         # Decode sparse structure latent
         decoder = self.models['sparse_structure_decoder']
         if self.low_vram:
@@ -229,10 +238,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         decoded = decoder(z_s)>0
         if self.low_vram:
             decoder.cpu()
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P3_ss_decoded", decoded.float())
+        
         if resolution != decoded.shape[2]:
             ratio = decoded.shape[2] // resolution
             decoded = torch.nn.functional.max_pool3d(decoded.float(), ratio, ratio, 0) > 0.5
         coords = torch.argwhere(decoded)[:, [0, 2, 3, 4]].int()
+
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P4_ss_coords", coords)
+            dbg_value(next_step(), "P4_ss_num_voxels", coords.shape[0])
 
         return coords
 
@@ -256,6 +273,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
             coords=coords,
         )
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P5_shape_slat_noise_feats", noise.feats)
+            dbg_tensor(next_step(), "P5_shape_slat_noise_coords", noise.coords)
+        
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
@@ -269,10 +291,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ).samples
         if self.low_vram:
             flow_model.cpu()
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P6_shape_slat_sampled", slat.feats)
 
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P7_shape_slat_denormed", slat.feats)
         
         return slat
     
@@ -469,7 +497,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             tex_slat (SparseTensor): The structured latent for texture.
             resolution (int): The resolution of the output.
         """
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P8_decode_shape_slat_input", shape_slat.feats)
+        
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P9_decode_mesh_vertices", meshes[0].vertices)
+            dbg_tensor(next_step(), "P9_decode_mesh_faces", meshes[0].faces)
+            dbg_value(next_step(), "P9_mesh_stats", f"vertices={meshes[0].vertices.shape[0]} faces={meshes[0].faces.shape[0]}")
+        
         tex_voxels = self.decode_tex_slat(tex_slat, subs)
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
@@ -485,6 +522,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     layout=self.pbr_attr_layout
                 )
             )
+        
+        if is_debug_enabled():
+            dbg_tensor(next_step(), "P10_final_mesh_vertices", out_mesh[0].vertices)
+            dbg_tensor(next_step(), "P10_final_mesh_faces", out_mesh[0].faces)
+            dbg_value(next_step(), "P10_final_mesh_stats", f"vertices={out_mesh[0].vertices.shape[0]} faces={out_mesh[0].faces.shape[0]}")
+        
         return out_mesh
     
     @torch.no_grad()

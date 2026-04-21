@@ -15,6 +15,9 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple, List
 import functools
+from .debug_utils import is_debug_enabled, dbg_tensor, dbg_value, dbg_rast_stats, next_step, get_debug_dir
+import os
+import numpy as np
 
 
 def build_mipmap(tex: torch.Tensor, max_levels: int = 12) -> List[torch.Tensor]:
@@ -150,20 +153,38 @@ class DRTKContext:
         import drtk
         
         h, w = resolution
-
-        x_ndc = vertices_clip[..., 0] / vertices_clip[..., 3].clamp(min=1e-8, max=1e8)
-        y_ndc = -vertices_clip[..., 1] / vertices_clip[..., 3].clamp(min=1e-8, max=1e8)
         
-        x_pix = (x_ndc + 1) * 0.5 * w
-        y_pix = (y_ndc + 1) * 0.5 * h
+        if is_debug_enabled():
+            step = next_step()
+            dbg_tensor(step, "DRTK_input_vertices_clip", vertices_clip)
+            dbg_value(step, "DRTK_input_resolution", resolution)
+            dbg_tensor(step, "DRTK_input_faces", faces)
+        
+        w_clip = vertices_clip[..., 3].clamp(min=1e-8, max=1e8)
+        x_ndc = vertices_clip[..., 0] / w_clip
+        y_ndc = -vertices_clip[..., 1] / w_clip
+        z_ndc = vertices_clip[..., 2] / w_clip
+        
+        x_pix = (x_ndc + 1) * 0.5 * w - 0.5
+        y_pix = (y_ndc + 1) * 0.5 * h - 0.5
         z_cam = vertices_clip[..., 3].clone()
         
         v_pix = torch.stack([x_pix, y_pix, z_cam], dim=-1)
+        
+        if is_debug_enabled():
+            step = next_step()
+            dbg_tensor(step, "DRTK_v_pix", v_pix)
         
         faces_int = faces.to(torch.int32) if faces.dtype != torch.int32 else faces
         
         index_img = drtk.rasterize(v_pix, faces_int, height=h, width=w)
         depth, bary = drtk.render(v_pix, faces_int, index_img)
+        
+        if is_debug_enabled():
+            step = next_step()
+            dbg_tensor(step, "DRTK_raw_index_img", index_img)
+            dbg_tensor(step, "DRTK_raw_depth", depth)
+            dbg_tensor(step, "DRTK_raw_bary", bary)
         
         # Cache for use in interpolate()
         self._cache_index_img = index_img
@@ -173,12 +194,22 @@ class DRTKContext:
         batch_size = v_pix.shape[0]
         rast = torch.zeros(batch_size, h, w, 4, device=v_pix.device, dtype=torch.float32)
         
-        rast[..., 0] = bary[:, 1]
-        rast[..., 1] = bary[:, 2]
-        rast[..., 2] = depth[:, 0]
-        rast[..., 3] = (index_img.float() + 1).float()
+        # DRTK returns: depth [batch, H, W], bary [batch, 3, H, W]
+        # bary dimensions are (w0, w1, w2) = weights for vertices 0, 1, 2
+        # nvdiffrast uses (u, v) where u=weight for v1, v=weight for v2
+        # So: u = bary[0, 1], v = bary[0, 2]
+        rast[0, ..., 0] = bary[0, 1]  # u = weight for vertex 1
+        rast[0, ..., 1] = bary[0, 2]  # v = weight for vertex 2
+        rast[0, ..., 2] = depth[0]    # camera-space depth
+        rast[0, ..., 3] = (index_img[0].float() + 1).float()
         
         rast_db = torch.zeros_like(rast)
+        
+        if is_debug_enabled():
+            step = next_step()
+            dbg_tensor(step, "DRTK_rast_output", rast)
+            dbg_rast_stats(step, rast, "DRTK_rast")
+            dbg_tensor(step, "DRTK_rast_db", rast_db)
         
         return rast, rast_db
 
@@ -207,6 +238,12 @@ def interpolate(
     """
     import drtk
     
+    if is_debug_enabled():
+        step = next_step()
+        dbg_tensor(step, "DRTK_interp_input_attr", attr, save=False)
+        dbg_tensor(step, "DRTK_interp_input_rast", rast, save=False)
+        dbg_value(step, "DRTK_interp_input_faces_shape", faces.shape)
+    
     if attr.dim() == 2:
         attr = attr.unsqueeze(0)
     
@@ -227,12 +264,30 @@ def interpolate(
         v = rast[..., 1]
         w0 = 1.0 - u - v
         bary_img = torch.stack([w0, u, v], dim=1)
+        # Ensure batch dimension for compatibility with drtk.interpolate
+        if index_img.dim() == 2:
+            index_img = index_img.unsqueeze(0)
+        if bary_img.dim() == 3:
+            bary_img = bary_img.unsqueeze(0)
+    
+    if is_debug_enabled():
+        step = next_step()
+        dbg_tensor(step, "DRTK_interp_index_img", index_img, save=False)
+        dbg_tensor(step, "DRTK_interp_bary_img", bary_img, save=False)
     
     faces_int = faces.to(torch.int32) if faces.dtype != torch.int32 else faces
     
     result = drtk.interpolate(attr, faces_int, index_img, bary_img)
     
+    if is_debug_enabled():
+        step = next_step()
+        dbg_tensor(step, "DRTK_interp_raw_result", result, save=False)
+    
     result = result.permute(0, 2, 3, 1)
+    
+    if is_debug_enabled():
+        step = next_step()
+        dbg_tensor(step, "DRTK_interp_final_result", result)
     
     return result, None
 
@@ -347,7 +402,22 @@ def antialias(color: torch.Tensor, rast: torch.Tensor, vertices: torch.Tensor, f
 class DepthPeeler:
     """Context manager for depth peeling, mimicking nvdiffrast's DepthPeeler.
     
-    DRTK doesn't have built-in depth peeling, so we implement it manually.
+    DRTK doesn't have built-in depth peeling, so we implement it manually using
+    a multi-pass approach with per-pixel depth comparison.
+    
+    Algorithm:
+    - Layer 0: Normal rasterization (closest surface)
+    - Layer N > 0: Re-rasterize, then filter results to exclude surfaces at or 
+      in front of the minimum depth from previous layers.
+      
+    This approach has limitations compared to nvdiffrast's depth peeling:
+    - It can only see surfaces that DRTK's rasterizer returns as "closest" at each pixel
+    - For surfaces that were behind previous layers at EVERY pixel, they will now become
+      visible at pixels where previous-layer surfaces were drawn
+    - Complete depth peeling would require modifying vertex depths, which is expensive
+    
+    For transparent rendering in TRELLIS, this approximation is often sufficient because
+    transparent surfaces tend to be spread across different screen-space regions.
     """
     def __init__(self, ctx: DRTKContext, vertices_clip: torch.Tensor, faces: torch.Tensor, resolution: Tuple[int, int]):
         self.ctx = ctx
@@ -355,8 +425,8 @@ class DepthPeeler:
         self.faces = faces
         self.resolution = resolution
         self.layers_drawn = 0
-        self.max_layers = 100  # Safety limit
-        self.depth_buffer = None  # Accumulated depth layers
+        self.max_layers = 100
+        self.min_depth_per_pixel = None  # [H, W] - closest depth seen so far
         self._cache_index_img = None
         self._cache_bary = None
     
@@ -369,48 +439,75 @@ class DepthPeeler:
         """Rasterize the next depth layer (peel).
         
         Returns:
-            rast: Rasterization output for current layer
-            rast_db: Barycentric derivatives
+            rast: Rasterization output for current layer  
+            rast_db: Barycentric derivatives (placeholder zeros)
         """
         import drtk
         
-        if self.layers_drawn >= self.max_layers:
-            return torch.zeros(1, self.resolution[0], self.resolution[1], 4, device=self.vertices_clip.device), None
-        
-        batch_size = self.vertices_clip.shape[0]
         h, w = self.resolution
+        device = self.vertices_clip.device
+        batch_size = self.vertices_clip.shape[0]
         
-        x_ndc = self.vertices_clip[..., 0] / self.vertices_clip[..., 3].clamp(min=1e-8)
-        y_ndc = -self.vertices_clip[..., 1] / self.vertices_clip[..., 3].clamp(min=1e-8)
-        z_cam = self.vertices_clip[..., 3]
+        if self.layers_drawn >= self.max_layers:
+            return torch.zeros(batch_size, h, w, 4, device=device, dtype=torch.float32), None
         
-        x_pix = (x_ndc + 1) * 0.5 * w
-        y_pix = (y_ndc + 1) * 0.5 * h
+        w_clip = self.vertices_clip[..., 3].clamp(min=1e-8)
+        x_ndc = self.vertices_clip[..., 0] / w_clip
+        y_ndc = -self.vertices_clip[..., 1] / w_clip
+        z_ndc = self.vertices_clip[..., 2] / w_clip
+        z_cam = self.vertices_clip[..., 3].clone()
+        
+        x_pix = (x_ndc + 1) * 0.5 * w - 0.5
+        y_pix = (y_ndc + 1) * 0.5 * h - 0.5
         
         v_pix = torch.stack([x_pix, y_pix, z_cam], dim=-1)
         faces_int = self.faces.to(torch.int32) if self.faces.dtype != torch.int32 else self.faces
         
+        # Rasterize to get closest surfaces at each pixel
         index_img = drtk.rasterize(v_pix, faces_int, height=h, width=w)
         depth, bary = drtk.render(v_pix, faces_int, index_img)
+        
+        # DRTK returns: depth [batch, H, W], bary [batch, 3, H, W]
+        current_depth = depth[0]  # [H, W] camera-space depth
+        
+        if self.min_depth_per_pixel is None:
+            # First layer: store depths, nothing to filter
+            self.min_depth_per_pixel = current_depth.clone()
+        else:
+            # Subsequent layers: filter out surfaces at or in front of previous minimum
+            # index_img [1, H, W], depth [1, H, W] -> current_depth [H, W]
+            has_geom = index_img[0] >= 0  # [H, W]
+            # Surface is valid for this layer if it's strictly behind previous minimum
+            # (depth in camera space: larger = further from camera)
+            behind_prev = current_depth > self.min_depth_per_pixel + 1e-6  # [H, W]
+            
+            # Valid pixel: has geometry AND is behind previous layers
+            valid = has_geom & behind_prev  # [H, W]
+            
+            # Clear index_img where not valid
+            index_img = torch.where(valid.unsqueeze(0), index_img, torch.full_like(index_img, -1))
+            
+            # Update min depth where valid
+            self.min_depth_per_pixel = torch.where(
+                valid,
+                current_depth,
+                self.min_depth_per_pixel
+            )
         
         # Cache for interpolate
         self._cache_index_img = index_img
         self._cache_bary = bary
         
-        if self.depth_buffer is not None:
-            has_geom = index_img >= 0
-            current_depth = depth[0, 0]
-            pass
-        
-        rast = torch.zeros(batch_size, h, w, 4, device=self.vertices_clip.device, dtype=torch.float32)
-        rast[..., 0] = bary[:, 1]
-        rast[..., 1] = bary[:, 2]
-        rast[..., 2] = depth[:, 0]
-        rast[..., 3] = (index_img.float() + 1).float()
+        # Build rast output in nvdiffrast format
+        # DRTK returns: depth [batch, H, W], bary [batch, 3, H, W]
+        rast = torch.zeros(batch_size, h, w, 4, device=device, dtype=torch.float32)
+        rast[0, ..., 0] = bary[0, 1]  # u = weight for vertex 1
+        rast[0, ..., 1] = bary[0, 2]  # v = weight for vertex 2
+        rast[0, ..., 2] = depth[0]    # Camera-space depth for depth peeling
+        rast[0, ..., 3] = (index_img[0].float() + 1).float()
         
         rast_db = torch.zeros_like(rast)
         
-        self.depth_buffer = depth.clone()
         self.layers_drawn += 1
         
         return rast, rast_db

@@ -1,0 +1,191 @@
+================================================================================
+POTENTIAL ISSUES - DRTK FORK
+================================================================================
+
+This file tracks discovered issues. Update as issues are found and fixed.
+
+Legend:
+  [PENDING]    - Issue identified, not yet fixed
+  [IN_PROGRESS] - Currently being worked on
+  [FIXED]      - Issue resolved and committed
+  [VERIFIED]   - Fixed and verified by tests
+
+================================================================================
+ISSUE 1: PIPELINE DETERMINISM
+================================================================================
+
+STATUS: [PENDING]
+
+SEVERITY: CRITICAL - Causes completely different meshes
+
+DESCRIPTION:
+  Both projects use seed=42, but produce different meshes:
+  - Fork:     383K vertices, 699K faces
+  - Official: 1.47M vertices, 3.14M faces
+
+  The divergence starts at P2_ss_z_s_sampled stage where the latent tensor
+  values differ despite using the same random seed.
+
+EVIDENCE:
+  - P1_ss_noise.npy is IDENTICAL between both (seed works initially)
+  - P2_ss_z_s_sampled.npy differs: std=0.29 (fork) vs std=0.60 (official)
+  - P4_ss_coords shape: [1112, 4] (fork) vs [3540, 4] (official)
+
+ROOT CAUSE:
+  Import order and warning filters affect global RNG state.
+  The fork has these lines before seed setting:
+    import warnings
+    warnings.filterwarnings(...)
+  
+  These run BEFORE test_render_mesh.py sets torch.manual_seed(42).
+  The official project doesn't filter warnings, so RNG state differs.
+
+LOCATION:
+  - test_render_mesh.py line 1-4 (warning filters before imports)
+  - trellis2/pipelines/trellis2_image_to_3d.py (where seed is used)
+
+FIX APPROACH:
+  1. Move torch.manual_seed(42) to VERY FIRST line in test_render_mesh.py
+  2. Set torch.cuda.manual_seed_all(42)
+  3. Add torch.backends.cudnn.deterministic = True
+  4. Add torch.backends.cudnn.benchmark = False
+  5. Move warnings.filterwarnings AFTER seed setting
+
+VERIFICATION:
+  - P2_ss_z_s_sampled.npy should be IDENTICAL
+  - P10_final_mesh_vertices/faces should have same shapes
+
+================================================================================
+ISSUE 2: DEPTH VALUE CONVENTION
+================================================================================
+
+STATUS: [PENDING] - NOT A BUG, JUST DIFFERENT CONVENTION
+
+SEVERITY: INFO - Not causing rendering errors
+
+DESCRIPTION:
+  Depth values in rasterizer output differ by convention:
+  - Fork (DRTK):    depth ∈ [9.66, 10.17] (camera-space z)
+  - Official:       depth ∈ [0.81, 0.82] (normalized depth z/w in NDC)
+
+EXPLANATION:
+  nvdiffrast outputs z/w (normalized device coordinates depth).
+  DRTK outputs z_camera (actual distance from camera).
+  
+  Both are CORRECT for their respective conventions. The difference
+  does NOT cause rendering errors - depth ordering is preserved.
+
+LOCATION:
+  - trellis2/utils/drtk_compat.py line ~160-190 in rasterize()
+    rast[0, ..., 2] = depth[0]  # camera-space depth
+
+NOTE: This is INTENTIONAL. z_camera is actually more physically
+      meaningful than z/w for many use cases. DO NOT "FIX" THIS.
+
+================================================================================
+ISSUE 3: RASTERIZER COVERAGE DIFFERENCE
+================================================================================
+
+STATUS: [PENDING] - BLOCKED BY ISSUE 1
+
+SEVERITY: HIGH - Affects render quality
+
+DESCRIPTION:
+  Rasterizer coverage differs significantly:
+  - Fork (DRTK):    9.16% of pixels have geometry
+  - Official:       25.67% of pixels have geometry
+
+  This is because the meshes are different sizes (3.8x vertex difference).
+  Cannot verify DRTK correctness until meshes are identical.
+
+DEPENDENCY:
+  BLOCKED by Issue 1 (Pipeline Determinism)
+
+VERIFICATION (after Issue 1 fixed):
+  - Coverage should be similar (~25% ± 5%)
+  - Triangle ID ranges similar
+  - Barycentric coords in valid range [0,1]
+
+================================================================================
+ISSUE 4: BARYCENTRIC COORDINATE MAPPING
+================================================================================
+
+STATUS: [PENDING] - VERIFICATION NEEDED AFTER ISSUE 1
+
+SEVERITY: MEDIUM - Could cause interpolation errors
+
+DESCRIPTION:
+  DRTK and nvdiffrast use different barycentric coordinate conventions:
+  
+  DRTK:     bary_img has shape [1, 3, H, W] with weights (w0, w1, w2)
+            for vertices v0, v1, v2 respectively
+  
+  nvdiffrast: rast[..., 0:2] has (u, v) where:
+            u = weight for vertex 1
+            v = weight for vertex 2
+            w0 = 1 - u - v (weight for vertex 0)
+
+  The current mapping in drtk_compat.py:
+    rast[0, ..., 0] = bary[0, 1]  # u = weight for vertex 1
+    rast[0, ..., 1] = bary[0, 2]  # v = weight for vertex 2
+
+LOCATION:
+  - trellis2/utils/drtk_compat.py lines ~180-190 in DRTKContext.rasterize()
+
+VERIFICATION NEEDED:
+  - Check if u = bary[0, 1] is correct or should be bary[0, 0]
+  - Verify against nvdiffrast documentation
+  - Check DRTK documentation for barycentric convention
+
+SUCCESS CRITERIA:
+  - Interpolated normals should have reasonable range [-1, 1]
+  - Interpolated depth should match camera-space depth range
+  - Visual check: normal_00.png should look like proper surface normals
+
+================================================================================
+ISSUE 5: ANTIALIAS FUNCTION
+================================================================================
+
+STATUS: [PENDING] - NOT A BUG
+
+SEVERITY: LOW - May affect edge quality but not core functionality
+
+DESCRIPTION:
+  The antialias() function in drtk_compat.py is a no-op placeholder.
+  DRTK's edge_grad_estimator provides gradient computation, not visual AA.
+
+LOCATION:
+  - trellis2/utils/drtk_compat.py lines ~336-355 (antialias function)
+
+CURRENT BEHAVIOR:
+  Returns input unchanged: return color
+
+IMPACT:
+  - Edges may be slightly more aliased than nvdiffrast
+  - Does NOT affect correctness, only visual quality
+  - May affect gradient computation in training (not inference)
+
+NOTE: This is acceptable for inference. Consider implementing MSAA
+      or post-process AA if edge quality is critical for use case.
+
+================================================================================
+DISCOVERED ISSUES LOG
+================================================================================
+
+Format: DATE - ISSUE_NUMBER - STATUS_CHANGE
+
+2026-04-21 - Issue 1 - DISCOVERED: Pipeline produces different meshes
+2026-04-21 - Issue 2 - DISCOVERED: Depth convention difference (not a bug)
+2026-04-21 - Issue 3 - DISCOVERED: Rasterizer coverage mismatch (blocked)
+2026-04-21 - Issue 4 - DISCOVERED: Barycentric mapping needs verification
+2026-04-21 - Issue 5 - DISCOVERED: Antialias is no-op (acceptable)
+
+================================================================================
+FIXED ISSUES LOG
+================================================================================
+
+(None yet - Update when issues are resolved)
+
+================================================================================
+END OF POTENTIAL ISSUES
+================================================================================
