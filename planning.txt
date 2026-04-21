@@ -172,7 +172,7 @@ RESULTS:
 PHASE 6: PBR RENDERER VERIFICATION
 ================================================================================
 
-STATUS: IN_PROGRESS
+STATUS: MOSTLY COMPLETE - Voxel attrs now match, brightness issue remains
 
 CONTEXT:
    After MeshRenderer is verified, test PbrMeshRenderer which uses:
@@ -207,24 +207,18 @@ KEY COMPONENTS:
       - Uses precomputed BSDF LUT for BRDF integration
       - Replaces nvdiffrec's EnvironmentLight
 
-TEST APPROACH:
-   1. Run test_render_pbr.py on both fork and official
-   2. Compare outputs using compare_pbr.py
-   3. Compare intermediate values:
-      - base_color, metallic, roughness, alpha from grid_sample_3d
-      - shaded output from PBREnvironmentLight.shade()
-
-COMPARISON POINTS:
-   - Mask coverage should match MeshRenderer results
-   - base_color, metallic, roughness, alpha should have same range
-   - shaded output should match in brightness and color
-
-CURRENT FINDINGS:
-   - PBR rendering completes without errors
-   - Mask coverage nearly identical (67266 vs 67280)
-   - Shaded output DIMMER in fork (max 0.68 vs 1.0)
-   - Material values LOWER in fork (base_color max 0.54 vs 1.0)
-   - Possible issue: PBREnvironmentLight.shade() or grid_sample_3d differences
+FINDINGS:
+   ✓ Mesh geometry matches (Issue 1 fixed)
+   ✓ Voxel attrs now match official (Issue 6 fixed)
+   ✓ Mask coverage identical (67266 vs 67280)
+   ✓ Depth peeling works correctly for opaque meshes
+   ✗ Shaded output is DIMMER in fork (max 0.73 vs 1.0, mean 6x lower)
+   
+ISSUE 9: PBREnvironmentLight produces dimmer output
+   - Fork: shaded max 0.73, mean 0.13
+   - Official: shaded max 1.0, mean 0.03 (after tonemapping, images show mean 8.15)
+   - This is likely in the PBREnvironmentLight.shade() implementation
+   - May need to compare against nvdiffrec's EnvironmentLight
 
 COMPARISON SCRIPT:
    - Use compare_pbr.py to compare test_output_pbr vs test_output_pbr_official

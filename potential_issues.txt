@@ -259,6 +259,45 @@ VERIFICATION:
    - No nvdiffrast import errors
 
 ================================================================================
+ISSUE 9: PBREnvironmentLight produces dimmer output than nvdiffrec
+================================================================================
+
+STATUS: [PENDING]
+
+SEVERITY: MEDIUM - PBR render looks dimmer than official
+
+DESCRIPTION:
+   The pure PyTorch PBREnvironmentLight.shade() produces output that is
+   significantly dimmer than the official nvdiffrec EnvironmentLight.
+   
+   Comparison (after fixing Issue 6):
+   
+   | Metric        | Fork     | Official |
+   |---------------|----------|----------|
+   | Shaded max    | 0.73     | 1.0      |
+   | Shaded mean   | 0.13     | 0.03*    |
+   | Image mean    | 0.13     | 8.15**   |
+   
+   * Official uses different tonemapping/gamma
+   ** Image comparison (0-255 range)
+   
+   Both use same:
+   - Mesh geometry (verified)
+   - Voxel attrs (verified after Issue 6 fix)
+   - Environment map (same HDRI file)
+   - Camera parameters
+   
+INVESTIGATION NEEDED:
+   - Compare PBREnvironmentLight.shade() vs nvdiffrec EnvironmentLight
+   - Check diffuse irradiance computation
+   - Check specular split-sum approximation
+   - Verify BSDF LUT values
+
+LOCATION:
+   - trellis2/renderers/pbr_envmap.py - PBREnvironmentLight class
+   - trellis2/renderers/pbr_envmap_data/bsdf_256_256.bin
+
+================================================================================
 DISCOVERED ISSUES LOG
 ================================================================================
 
@@ -272,6 +311,7 @@ Format: DATE - ISSUE_NUMBER - STATUS_CHANGE
 2026-04-21 - Issue 6 - DISCOVERED: PBR material values differ significantly
 2026-04-21 - Issue 7 - DISCOVERED: Background pixels have garbage values in DRTK interpolate
 2026-04-21 - Issue 8 - FIXED: nvdiffrec dependency removal
+2026-04-21 - Issue 9 - DISCOVERED: PBREnvironmentLight produces dimmer output
 
 ================================================================================
 FIXED ISSUES LOG
@@ -294,6 +334,11 @@ Format: DATE - ISSUE_NUMBER - STATUS_CHANGE
 
 2026-04-21 - Issue 8 - FIXED: nvdiffrec dependency removed and replaced with
   pure PyTorch PBR implementation
+
+2026-04-21 - Issue 6 - FIXED: Voxel attrs now match official after:
+  * Changed sample_tex_slat() to use shape_slat_normalization
+  * Matches official's (incorrect but consistent) behavior
+  * base_color, metallic, roughness, alpha values now identical
 
 ================================================================================
 END OF POTENTIAL ISSUES
