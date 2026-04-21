@@ -14,7 +14,7 @@ Legend:
 ISSUE 1: PIPELINE DETERMINISM
 ================================================================================
 
-STATUS: [PENDING]
+STATUS: [FIXED]
 
 SEVERITY: CRITICAL - Causes completely different meshes
 
@@ -32,40 +32,44 @@ EVIDENCE:
   - P4_ss_coords shape: [1112, 4] (fork) vs [3540, 4] (official)
 
 ROOT CAUSE:
-  Import order and warning filters affect global RNG state.
-  The fork has these lines before seed setting:
-    import warnings
-    warnings.filterwarnings(...)
-  
-  These run BEFORE test_render_mesh.py sets torch.manual_seed(42).
-  The official project doesn't filter warnings, so RNG state differs.
+  1. Import order and warning filters affect global RNG state.
+  2. Image feature extractor used incorrect method (model.forward() vs
+     custom extraction with rope embeddings)
+  3. Flash Attention calls were nondeterministic (missing deterministic=True)
 
 LOCATION:
-  - test_render_mesh.py line 1-4 (warning filters before imports)
-  - trellis2/pipelines/trellis2_image_to_3d.py (where seed is used)
+  - test_render_mesh.py lines 1-5 (seed/determinism flags)
+  - trellis2/modules/image_feature_extractor.py (DinoV3FeatureExtractor)
+  - trellis2/modules/attention/full_attn.py
+  - trellis2/modules/sparse/attention/full_attn.py
+  - trellis2/modules/sparse/attention/windowed_attn.py
 
-FIX APPROACH:
+FIX:
   1. Move torch.manual_seed(42) to VERY FIRST line in test_render_mesh.py
   2. Set torch.cuda.manual_seed_all(42)
   3. Add torch.backends.cudnn.deterministic = True
   4. Add torch.backends.cudnn.benchmark = False
-  5. Move warnings.filterwarnings AFTER seed setting
+  5. Set deterministic=True on all flash_attn calls
+  6. Fix DinoV3FeatureExtractor.extract_features() to use custom method
+     with rope_embeddings like official implementation
 
 VERIFICATION:
-  - P2_ss_z_s_sampled.npy should be IDENTICAL
-  - P10_final_mesh_vertices/faces should have same shapes
+  - P2_ss_z_s_sampled.npy is now IDENTICAL
+  - P10_final_mesh_vertices/faces have identical shapes
+  - Vertex values are identical (verified with np.allclose)
+  - Mesh: 1,470,764 vertices, 3,137,414 faces (matches official)
 
 ================================================================================
 ISSUE 2: DEPTH VALUE CONVENTION
 ================================================================================
 
-STATUS: [PENDING] - NOT A BUG, JUST DIFFERENT CONVENTION
+STATUS: [VERIFIED] - NOT A BUG, JUST DIFFERENT CONVENTION
 
 SEVERITY: INFO - Not causing rendering errors
 
 DESCRIPTION:
   Depth values in rasterizer output differ by convention:
-  - Fork (DRTK):    depth ∈ [9.66, 10.17] (camera-space z)
+  - Fork (DRTK):    depth ∈ [9.66, 10.27] (camera-space z)
   - Official:       depth ∈ [0.81, 0.82] (normalized depth z/w in NDC)
 
 EXPLANATION:
@@ -76,7 +80,7 @@ EXPLANATION:
   does NOT cause rendering errors - depth ordering is preserved.
 
 LOCATION:
-  - trellis2/utils/drtk_compat.py line ~160-190 in rasterize()
+  - trellis2/utils/drtk_compat.py line ~203 in rasterize()
     rast[0, ..., 2] = depth[0]  # camera-space depth
 
 NOTE: This is INTENTIONAL. z_camera is actually more physically
@@ -86,31 +90,27 @@ NOTE: This is INTENTIONAL. z_camera is actually more physically
 ISSUE 3: RASTERIZER COVERAGE DIFFERENCE
 ================================================================================
 
-STATUS: [PENDING] - BLOCKED BY ISSUE 1
+STATUS: [VERIFIED] - Coverage now matches after Issue 1 fix
 
 SEVERITY: HIGH - Affects render quality
 
 DESCRIPTION:
-  Rasterizer coverage differs significantly:
-  - Fork (DRTK):    9.16% of pixels have geometry
+  Rasterizer coverage now matches between fork and official:
+  - Fork (DRTK):    25.67% of pixels have geometry
   - Official:       25.67% of pixels have geometry
 
-  This is because the meshes are different sizes (3.8x vertex difference).
-  Cannot verify DRTK correctness until meshes are identical.
+  Previously differed (9.16% vs 25.67%) due to different mesh sizes.
 
-DEPENDENCY:
-  BLOCKED by Issue 1 (Pipeline Determinism)
-
-VERIFICATION (after Issue 1 fixed):
-  - Coverage should be similar (~25% ± 5%)
-  - Triangle ID ranges similar
+VERIFICATION:
+  - Coverage matches: 269161/1048576 pixels (25.67%)
+  - Triangle ID ranges similar (unique triangles: ~242K)
   - Barycentric coords in valid range [0,1]
 
 ================================================================================
 ISSUE 4: BARYCENTRIC COORDINATE MAPPING
 ================================================================================
 
-STATUS: [PENDING] - VERIFICATION NEEDED AFTER ISSUE 1
+STATUS: [VERIFIED] - Mapping is correct
 
 SEVERITY: MEDIUM - Could cause interpolation errors
 
@@ -132,15 +132,13 @@ DESCRIPTION:
 LOCATION:
   - trellis2/utils/drtk_compat.py lines ~180-190 in DRTKContext.rasterize()
 
-VERIFICATION NEEDED:
-  - Check if u = bary[0, 1] is correct or should be bary[0, 0]
-  - Verify against nvdiffrast documentation
-  - Check DRTK documentation for barycentric convention
-
-SUCCESS CRITERIA:
-  - Interpolated normals should have reasonable range [-1, 1]
-  - Interpolated depth should match camera-space depth range
-  - Visual check: normal_00.png should look like proper surface normals
+VERIFICATION RESULTS:
+  - Barycentric u mean: 0.3339 (fork) vs 0.3292 (official) - reasonable match
+  - Barycentric v mean: 0.3323 (fork) vs 0.3368 (official) - reasonable match
+  - Values in valid range [0, 1] for geometry pixels
+  - Interpolated normals have reasonable range [-1, 1]
+  - Interpolated depth values correct (camera-space z)
+  - Visual check: normal_00.png shows proper surface normals
 
 ================================================================================
 ISSUE 5: ANTIALIAS FUNCTION
@@ -184,7 +182,16 @@ Format: DATE - ISSUE_NUMBER - STATUS_CHANGE
 FIXED ISSUES LOG
 ================================================================================
 
-(None yet - Update when issues are resolved)
+Format: DATE - ISSUE_NUMBER - STATUS_CHANGE
+
+2026-04-21 - Issue 1 - FIXED: Pipeline produces identical meshes after:
+  * Fixing image feature extractor (DinoV3)
+  * Adding deterministic=True to all flash_attn calls
+  * Setting determinism flags at script start
+
+2026-04-21 - Issue 3 - VERIFIED: Rasterizer coverage now matches (25.67%)
+
+2026-04-21 - Issue 4 - VERIFIED: Barycentric coordinate mapping is correct
 
 ================================================================================
 END OF POTENTIAL ISSUES
