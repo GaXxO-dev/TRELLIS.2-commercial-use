@@ -166,7 +166,7 @@ class DRTKContext:
         z_ndc = vertices_clip[..., 2] / w_clip
         
         x_pix = (x_ndc + 1) * 0.5 * w - 0.5
-        y_pix = (y_ndc + 1) * 0.5 * h - 0.5
+        y_pix = (h - 1) - ((y_ndc + 1) * 0.5 * h - 0.5)
         z_cam = vertices_clip[..., 3].clone()
         
         v_pix = torch.stack([x_pix, y_pix, z_cam], dim=-1)
@@ -468,7 +468,7 @@ class DepthPeeler:
         z_cam = self.vertices_clip[..., 3].clone()
         
         x_pix = (x_ndc + 1) * 0.5 * w - 0.5
-        y_pix = (y_ndc + 1) * 0.5 * h - 0.5
+        y_pix = (h - 1) - ((y_ndc + 1) * 0.5 * h - 0.5)
         
         v_pix = torch.stack([x_pix, y_pix, z_cam], dim=-1)
         faces_int = self.faces.to(torch.int32) if self.faces.dtype != torch.int32 else self.faces
