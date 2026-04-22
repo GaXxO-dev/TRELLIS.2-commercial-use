@@ -172,7 +172,7 @@ RESULTS:
 PHASE 6: PBR RENDERER VERIFICATION
 ================================================================================
 
-STATUS: IN PROGRESS - Two remaining issues (11 and 12)
+STATUS: IN PROGRESS - Two critical issues (11 and 12) need fixing
 
 CONTEXT:
    After MeshRenderer is verified, test PbrMeshRenderer which uses:
@@ -191,48 +191,65 @@ FILES TO CHECK:
    - trellis2/renderers/pbr_envmap_data/bsdf_256_256.bin - Precomputed BSDF LUT
    - trellis2/utils/drtk_compat.py - DepthPeeler class (for depth peeling)
 
-KEY COMPONENTS:
+KEY COMPONENTS VERIFIED:
    1. DepthPeeler.rasterize_next_layer() [DRTK]:
-      - Calls DRTKContext.rasterize() per layer
-      - Filters out previously rendered triangles by depth
-      - Used for multi-layer transparency rendering
+      ✓ Calls DRTKContext.rasterize() per layer
+      ✓ Filters out previously rendered triangles by depth
+      ✓ Works correctly for opaque meshes
 
-   2. grid_sample_3d [flex_gemm]:
-      - Samples voxel attributes at interpolated 3D positions
-      - Interpolates base_color, metallic, roughness, alpha from voxel grid
-      - VERIFIED: Using official's xyz_voxel produces correct output
+   2. PBREnvironmentLight.shade() [Pure PyTorch]:
+      ✓ VERIFIED: Produces IDENTICAL output to nvdiffrec EnvironmentLight
+      ✓ Diffuse irradiance sampling works correctly
+      ✓ BSDF LUT matches official
+      ✓ Specular reflections match official
 
-   3. PBREnvironmentLight.shade() [Pure PyTorch]:
-      - Computes diffuse irradiance from environment map
-      - Computes specular reflections using split-sum approximation
-      - Uses precomputed BSDF LUT for BRDF integration
-      - Replaces nvdiffrec's EnvironmentLight
+   3. grid_sample_3d [flex_gemm]:
+      ✓ VERIFIED: Produces correct output when given same xyz_voxel as official
+      ✗ PROBLEM: DRTK produces different xyz_voxel values than nvdiffrast
+      ✗ These different xyz values cause sparse grid sampling to return near-zero values
 
-FINDINGS:
+CRITICAL FINDINGS:
    ✓ Mesh geometry matches (Issue 1 fixed)
    ✓ Voxel attrs now match official (Issue 6 fixed)
    ✓ Mask coverage identical (67266 vs 67280)
-   ✓ Depth peeling works correctly for opaque meshes
-   ✓ grid_sample_3d produces correct output (verified with official xyz_voxel)
-   ✗ Issue 9 RESOLVED: Different xyz values from rasterizers is expected behavior
+   ✓ PBREnvironmentLight works correctly (tested with same inputs as official)
    ✗ Issue 11: Model orientation inverted (ALL PBR outputs show T upside-down)
-   ✗ Issue 12: PBR materials very dim (model barely visible, ~60x dimmer)
+   ✗ Issue 12: PBR materials very dim (~60x dimmer, must be fixed to match official)
 
-ISSUE 11: Model orientation inverted
+ISSUE 11: Model orientation inverted (PENDING)
    - T character appears upside-down in ALL fork PBR outputs
-   - UNRELATED to material rendering issue
-   - Likely Y-axis flip in rasterization/coordinate system
+   - UNRELATED to material rendering quality
+   - Likely Y-axis flip in DRTK rasterization/coordinate system
    - Investigate: DRTK Y-axis convention, pixel coordinate origin
+   - Check: trellis2/utils/drtk_compat.py line ~165 (y_ndc = -vertices_clip[..., 1] / w_clip)
 
-ISSUE 12: PBR materials poor quality
+ISSUE 12: PBR materials dim (CRITICAL - MUST FIX)
    - Model BARELY VISIBLE despite correct mask coverage
-   - mask_pbr and normal work correctly
-   - base_color, metallic, roughness, alpha, shaded VERY DIM
-   - SEPARATE from orientation issue
-   - Investigate: PBREnvironmentLight.shade() vs nvdiffrec EnvironmentLight
+   - PBREnvironmentLight.shade() works correctly (VERIFIED)
+   - grid_sample_3d works correctly with correct xyz_voxel input
+   - ROOT CAUSE: DRTK produces different xyz_voxel values than nvdiffrast
+   
+   EVIDENCE:
+   - Fork base_color: only 2898/201798 nonzero pixels
+   - Official base_color: 157150/201840 nonzero pixels
+   - Brightness ratio: fork/official = 0.01 (should be ~1.0)
+   
+   The sparse voxel grid has ~1.47M voxels. When trilinear interpolation
+   queries a position, it needs 8 corner voxels. If corners are missing
+   from the sparse grid, they contribute 0 to the result.
+   
+   INVESTIGATION NEEDED:
+   1. Check if DRTK's Y-axis convention causes xyz_voxel offset
+   2. Compare xyz_voxel values between fork and official pixel-by-pixel
+   3. Investigate flex_gemm grid_sample_3d sparse grid handling
+   4. Consider implementing sparse-aware interpolation
 
-COMPARISON SCRIPT:
-   - Use compare_pbr.py to compare test_output_pbr vs test_output_pbr_official
+TEST VERIFICATION:
+   - Run: TRELLIS_DEBUG=1 conda run -n trellis2 python test_render_pbr.py
+   - Compare: python compare_pbr.py
+   - Key metrics:
+     - base_color mean should be ~8.5 (currently ~0.08)
+     - shaded mean should be ~8.2 (currently ~0.13)
 
 ================================================================================
 PHASE 7: GLB EXPORT VERIFICATION

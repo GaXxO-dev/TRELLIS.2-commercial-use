@@ -331,40 +331,88 @@ LOCATION TO INVESTIGATE:
    - Pixel coordinate system (Y-up vs Y-down)
 
 ================================================================================
-ISSUE 12: PBR MATERIALS POOR QUALITY
+ISSUE 12: PBR MATERIALS POOR QUALITY (CRITICAL - NEEDS FIX)
 ================================================================================
 
-STATUS: [PENDING] - Critical rendering issue
+STATUS: [IN_PROGRESS] - grid_sample_3d sparse voxel sampling issue
 
-SEVERITY: HIGH - Material rendering broken
+SEVERITY: CRITICAL - Material rendering broken, must match official exactly
 
 DESCRIPTION:
-   The T model is BARELY VISIBLE in PBR material outputs despite correct
-   mask coverage (67266 pixels). This is a SEPARATE issue from the orientation
-   flip (Issue 11).
+     The T model is BARELY VISIBLE in PBR material outputs despite correct
+     mask coverage (67266 pixels). THIS IS UNACCEPTABLE - materials must be
+     nearly identical to official nvdiffrast implementation.
 
-   Working correctly:
-   - mask_pbr_00.png: Coverage correct
-   - normal_pbr_00.png: Normal values correct
+     Key measurements:
+     - mask_pbr_00.png: Coverage correct (67266 vs 67280 official) ✓
+     - normal_pbr_00.png: Normal values correct ✓
+     - base_color_00.png: Only 2898/201798 nonzero pixels vs 157150/201840 official ✗
+     - Materials ~60x dimmer than official ✗
 
-   VERY DIM/WRONG:
-   - base_color_00.png: Mean ~0.0013 vs official ~0.13 (60x dimmer)
-   - metallic_00.png: Very dim
-   - roughness_00.png: Very dim
-   - alpha_00.png: Very dim
-   - shaded_00.png: Very dim
+INVESTIGATION COMPLETED:
+     The PBREnvironmentLight.shade() function works CORRECTLY - tested with
+     identical inputs produces identical outputs:
+     - Diffuse convolution matches official
+     - BSDF LUT matches official
+     - shade() function output matches official
 
-POSSIBLE CAUSES:
-   - PBREnvironmentLight implementation differs from nvdiffrec EnvironmentLight
-   - Diffuse irradiance calculation wrong
-   - Specular reflection calculation wrong
-   - Environment map UV sampling incorrect
-   - Material attributes incorrectly scaled or zeroed
+     The issue is NOT in PBREnvironmentLight. The issue is in grid_sample_3d:
 
-LOCATION TO INVESTIGATE:
-   - trellis2/renderers/pbr_envmap.py - PBREnvironmentLight.shade()
-   - trellis2/renderers/pbr_mesh_renderer.py - material attribute handling
-   - Compare against: ~/Documents/AI/TRELLIS.2/trellis2/renderers/pbr_mesh_renderer.py
+     EVIDENCE:
+     1. grid_sample_3d works correctly when tested directly with sparse voxel coords
+        (querying at voxel centers returns correct values)
+     
+     2. When given official's xyz_voxel values, fork's grid_sample_3d produces
+        CORRECT output (verified in Issue 9)
+     
+     3. Fork's xyz_voxel values differ from official's because DRTK's rasterizer
+        produces different barycentric coordinates at edges
+
+     4. The sparse voxel grid has ~1.47M voxels, but the mesh surface only
+        passes through SOME of them. When grid_sample_3d queries at a position
+        where the surrounding 8-voxel trilinear cell has MISSING corners, those
+        corners contribute 0 to the interpolation.
+
+ROOT CAUSE ANALYSIS:
+     DRTK's rasterize() produces different triangle IDs at edge pixels than
+     nvdiffrast. This leads to different barycentric weights, which leads to
+     different interpolated vertex positions (xyz). When these xyz positions
+     are converted to voxel coordinates and passed to grid_sample_3d, they
+     land at positions where the sparse grid has fewer filled 8-corner cells.
+     
+     The flex_gemm grid_sample_3d trilinear interpolation returns (weighted sum)
+     where missing corners contribute zero, making the output very dim.
+
+COMPARISON WITH Issue 9:
+     - Issue 9 claimed "RESOLVED - NOT A BUG" based on the logic that different
+       rasterizers produce different results
+     - HOWEVER: The user requires PBR materials to be IDENTICAL to official
+     - The ~60x brightness difference is NOT acceptable
+     - This MUST be fixed even if it requires adjusting how xyz is computed
+
+NEXT STEPS TO FIX:
+     Option A: Fix xyz interpolation to match nvdiffrast more closely
+       - Investigate if there's a Y-axis or other coordinate difference
+       - Check if barycentric coordinate convention is different
+     
+     Option B: Implement sparse-aware grid_sample_3d
+       - Count available corners in trilinear cell
+       - Normalize by number of available corners
+       - This is what nvdiffrast likely does internally
+     
+     Option C: Pre-compute dense voxel grid from sparse representation
+       - Convert sparse voxel grid to dense grid before sampling
+       - More memory but guarantees all 8 corners exist
+
+LOCATION:
+     - trellis2/renderers/pbr_mesh_renderer.py lines 351-358 (grid_sample_3d call)
+     - trellis2/utils/drtk_compat.py (interpolate function)
+     - flex_gemm/ops/grid_sample/grid_sample.py (grid_sample_3d implementation)
+
+DEBUG FILES SAVED:
+     - test_output_pbr/debug/*.npy - Fork's debug outputs
+     - test_output_pbr_official/debug/*.npy - Official's debug outputs
+     - compare_pbr.py - Comparison script
 
 ================================================================================
 DISCOVERED ISSUES LOG
@@ -384,6 +432,49 @@ Format: DATE - ISSUE_NUMBER - STATUS_CHANGE
 2026-04-22 - Issue 9 - RESOLVED: Different rasterizers sample different voxels (expected)
 2026-04-22 - Issue 11 - DISCOVERED: Model orientation inverted in all PBR outputs
 2026-04-22 - Issue 12 - DISCOVERED: PBR materials very dim despite correct mask/normal
+2026-04-22 - Issue 12 - INVESTIGATION: PBREnvironmentLight works correctly
+2026-04-22 - Issue 12 - ROOT CAUSE: grid_sample_3d sparse grid sampling with DRTK xyz values
+
+================================================================================
+CRITICAL NEXT STEPS FOR ISSUE 12
+================================================================================
+
+The issue is NOT in PBREnvironmentLight.shade() - that function produces identical
+output to nvdiffrec when given the same inputs.
+
+The issue is that DRTK produces different xyz_voxel values than nvdiffrast,
+and these differences cause grid_sample_3d to sample positions where the
+sparse voxel grid has missing corners.
+
+To fix this, the next agent should:
+
+1. COMPARE xyz_voxel VALUES PIXEL BY PIXEL
+   - Fork xyz_voxel values are saved in test_output_pbr/debug/04_DRTK_interp_final_result.npy
+   - Official xyz_voxel values could be saved by modifying official code
+   - Check if there's a systematic offset (e.g., Y-axis flip)
+
+2. INVESTIGATE DRTK BARYCENTRIC CONVENTION
+   - DRTK bary_img has shape [1, 3, H, W] with weights (w0, w1, w2)
+   - nvdiffrast rast has (u, v) where u = weight for vertex 1
+   - The mapping is: u = bary[0, 1], v = bary[0, 2]
+   - Check if this is correct
+
+3. CHECK VERTEX INTERPOLATION
+   - drtk.interpolate() returns interpolated values
+   - Compare fork's interpolated vertices with official
+   - The 04_DRTK_interp_final_result.npy shows range [-0.500, 0.499]
+   - This should match vertex positions in model space
+
+4. POSSIBLE FIX LOCATIONS:
+   - trellis2/utils/drtk_compat.py interpolate() function
+   - trellis2/renderers/pbr_mesh_renderer.py lines 344-362 (grid_sample_3d call)
+   - Consider implementing sparse-aware grid_sample_3d that normalizes by
+     number of available corners
+
+DEBUG FILES TO ANALYZE:
+   - test_output_pbr/debug/04_DRTK_interp_final_result.npy - Interpolated positions
+   - test_output_pbr_official/debug/ - Official debug files (limited)
+   - Use debug_pbr_shade.py to test PBREnvironmentLight independently
 
 ================================================================================
 FIXED ISSUES LOG
