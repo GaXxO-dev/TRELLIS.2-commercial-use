@@ -130,6 +130,7 @@ def screen_space_ambient_occlusion(
     bias: float = 1e-6,
     samples: int = 64,
     intensity: float = 1.0,
+    seed: int = 42,
 ) -> torch.Tensor:
     """
     Screen space ambient occlusion (SSAO)
@@ -142,11 +143,15 @@ def screen_space_ambient_occlusion(
         bias (float): bias to avoid self-occlusion
         samples (int): number of samples to use for the SSAO kernel
         intensity (float): intensity of the SSAO effect
+        seed (int): Random seed for deterministic SSAO sampling
     Returns:
         (torch.Tensor): [H, W, 1] SSAO image
     """
     device = depth.device
     H, W, _ = depth.shape
+    
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     
     fx = perspective[0, 0]
     fy = perspective[1, 1]

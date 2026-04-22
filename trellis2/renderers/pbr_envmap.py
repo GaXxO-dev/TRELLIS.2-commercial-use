@@ -236,26 +236,45 @@ def sample_cubemap_mip(cubemap_mips: List[torch.Tensor], directions: torch.Tenso
     """
     num_mips = len(cubemap_mips)
     
-    mip_level_clamped = torch.clamp(mip_level, 0, num_mips - 1)
+    if num_mips == 1:
+        return sample_cubemap(cubemap_mips[0], directions)
+    
+    original_shape = directions.shape[:-1]
+    C = cubemap_mips[0].shape[-1]
+    directions_flat = directions.reshape(-1, 3)
+    N = directions_flat.shape[0]
+    mip_level_flat = mip_level.reshape(-1)
+    
+    mip_level_clamped = torch.clamp(mip_level_flat, 0, num_mips - 1)
     mip_low = mip_level_clamped.floor().long()
     mip_high = (mip_low + 1).clamp(max=num_mips - 1)
-    t = mip_level_clamped - mip_low.float()
+    t = (mip_level_clamped - mip_low.float()).unsqueeze(-1)
     
-    # Find most common mip levels
-    mip_low_val = mip_low.reshape(-1).min().item()
-    mip_high_val = mip_high.reshape(-1).min().item()
+    result = torch.zeros(N, C, dtype=cubemap_mips[0].dtype, device=directions.device)
     
-    # Sample from two nearest mip levels
-    result_low = sample_cubemap(cubemap_mips[mip_low_val], directions)
-    result_high = sample_cubemap(cubemap_mips[mip_high_val], directions)
+    for mip_idx in range(num_mips):
+        mask = (mip_low == mip_idx) | (mip_high == mip_idx)
+        if not mask.any():
+            continue
+        
+        idx = torch.where(mask)[0]
+        dirs_this = directions_flat[idx]
+        mip_low_this = mip_low[idx]
+        mip_high_this = mip_high[idx]
+        
+        low_mip_idx = mip_low_this[0].item()
+        high_mip_idx = mip_high_this[0].item()
+        
+        if low_mip_idx == high_mip_idx:
+            sampled = sample_cubemap(cubemap_mips[low_mip_idx], dirs_this)
+            result[idx] = sampled
+        else:
+            sampled_low = sample_cubemap(cubemap_mips[low_mip_idx], dirs_this)
+            sampled_high = sample_cubemap(cubemap_mips[high_mip_idx], dirs_this)
+            t_this = t[idx]
+            result[idx] = torch.lerp(sampled_low, sampled_high, t_this)
     
-    # Interpolate
-    while t.dim() < result_low.dim():
-        t = t.unsqueeze(-1)
-    
-    result = torch.lerp(result_low, result_high, t.float())
-    
-    return result
+    return result.reshape(*original_shape, C)
 
 
 def avg_pool_cubemap(cubemap: torch.Tensor) -> torch.Tensor:
