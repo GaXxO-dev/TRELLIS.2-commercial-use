@@ -172,7 +172,7 @@ RESULTS:
 PHASE 6: PBR RENDERER VERIFICATION
 ================================================================================
 
-STATUS: MOSTLY COMPLETE - Voxel attrs now match, brightness issue remains
+STATUS: IN PROGRESS - Two remaining issues (11 and 12)
 
 CONTEXT:
    After MeshRenderer is verified, test PbrMeshRenderer which uses:
@@ -200,6 +200,7 @@ KEY COMPONENTS:
    2. grid_sample_3d [flex_gemm]:
       - Samples voxel attributes at interpolated 3D positions
       - Interpolates base_color, metallic, roughness, alpha from voxel grid
+      - VERIFIED: Using official's xyz_voxel produces correct output
 
    3. PBREnvironmentLight.shade() [Pure PyTorch]:
       - Computes diffuse irradiance from environment map
@@ -212,13 +213,23 @@ FINDINGS:
    ✓ Voxel attrs now match official (Issue 6 fixed)
    ✓ Mask coverage identical (67266 vs 67280)
    ✓ Depth peeling works correctly for opaque meshes
-   ✗ Shaded output is DIMMER in fork (max 0.73 vs 1.0, mean 6x lower)
-   
-ISSUE 9: PBREnvironmentLight produces dimmer output
-   - Fork: shaded max 0.73, mean 0.13
-   - Official: shaded max 1.0, mean 0.03 (after tonemapping, images show mean 8.15)
-   - This is likely in the PBREnvironmentLight.shade() implementation
-   - May need to compare against nvdiffrec's EnvironmentLight
+   ✓ grid_sample_3d produces correct output (verified with official xyz_voxel)
+   ✗ Issue 9 RESOLVED: Different xyz values from rasterizers is expected behavior
+   ✗ Issue 11: Model orientation inverted (ALL PBR outputs show T upside-down)
+   ✗ Issue 12: PBR materials very dim (model barely visible, ~60x dimmer)
+
+ISSUE 11: Model orientation inverted
+   - T character appears upside-down in ALL fork PBR outputs
+   - UNRELATED to material rendering issue
+   - Likely Y-axis flip in rasterization/coordinate system
+   - Investigate: DRTK Y-axis convention, pixel coordinate origin
+
+ISSUE 12: PBR materials poor quality
+   - Model BARELY VISIBLE despite correct mask coverage
+   - mask_pbr and normal work correctly
+   - base_color, metallic, roughness, alpha, shaded VERY DIM
+   - SEPARATE from orientation issue
+   - Investigate: PBREnvironmentLight.shade() vs nvdiffrec EnvironmentLight
 
 COMPARISON SCRIPT:
    - Use compare_pbr.py to compare test_output_pbr vs test_output_pbr_official

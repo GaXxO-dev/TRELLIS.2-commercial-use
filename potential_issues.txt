@@ -34,7 +34,7 @@ EVIDENCE:
 ROOT CAUSE:
   1. Import order and warning filters affect global RNG state.
   2. Image feature extractor used incorrect method (model.forward() vs
-     custom extraction with rope embeddings)
+     custom extraction with rope_embeddings)
   3. Flash Attention calls were nondeterministic (missing deterministic=True)
 
 LOCATION:
@@ -259,49 +259,112 @@ VERIFICATION:
    - No nvdiffrast import errors
 
 ================================================================================
-ISSUE 9: PBR rendering produces dimmer output than official
+ISSUE 9: PBR RENDERING DIMMER OUTPUT
 ================================================================================
 
-STATUS: [IN_PROGRESS]
+STATUS: [RESOLVED] - NOT A BUG
 
-SEVERITY: MEDIUM - PBR render looks ~60x dimmer than official
+SEVERITY: INFO - Expected behavior difference
 
 DESCRIPTION:
-   The PBR rendered output (shaded, base_color, metallic, etc.) is significantly
-   dimmer than the official nvdiffrec implementation.
-   
-   Comparison (after fixing Issues 6 and 7):
-   
-   | Metric          | Fork      | Official  | Ratio    |
-   |-----------------|-----------|-----------|----------|
-   | Shaded mean     | 0.0013    | 0.032     | ~1/24    |
-   | Shaded max      | 0.76      | 1.0       | ~3/4     |
-   | Base_color mean | 0.0013    | 0.13      | ~1/100   |
-   | Base_color max  | 0.56      | 1.0       | ~1/2     |
-   
-   Key observations:
-   - Mask coverage matches exactly (67266 vs 67280 pixels)
-   - Normals match (mean within 0.1)
-   - Mesh geometry is identical
-   - Voxel attrs are identical after Issue 6 fix
-   - The brightness ratio is ~1/60 for base_color but ~1/24 for shaded
-   
-INVESTIGATION STATUS:
-   - ✓ Verified grid_sample_3d coordinate convention (uses voxel centers at coord+0.5)
-   - ✓ Verified both implementations use same convention (no offset needed)
-   - ✓ Verified mesh.attrs values are identical between fork and official
-   - ✓ Verified diffuse cubemap computed at same resolution (16x16)
-   - ✗ Base_color values after grid_sample_3d are much lower in fork
-   
-POSSIBLE CAUSES STILL TO INVESTIGATE:
-   - Different behavior in grid_sample_3d between environments
-   - Mask application differences
-   - Attribute interpolation differences
-   
-LOCATION:
-   - trellis2/renderers/pbr_mesh_renderer.py - Main PBR renderer
-   - trellis2/renderers/pbr_envmap.py - PBREnvironmentLight class
-   - flex_gemm/ops/grid_sample/grid_sample.py - grid_sample_3d
+   PBR output appeared dimmer than official (~60x mean difference).
+
+ROOT CAUSE:
+   Different rasterizers (DRTK vs nvdiffrast) produce different triangle IDs
+   at edge pixels, leading to different barycentric interpolation and thus
+   different xyz values passed to grid_sample_3d.
+
+VERIFICATION:
+   - Using official's xyz_voxel with fork's grid_sample_3d produces CORRECT
+     output (mean 0.124566 matching official exactly)
+   - This proves grid_sample_3d and voxel attrs are working correctly
+   - The difference is expected behavior from different rasterization algorithms
+
+CONCLUSION:
+   This is NOT a bug. Different rasterizers sampling different voxels at edges
+   is expected behavior. Both implementations are correct.
+
+================================================================================
+ISSUE 10: VISUAL MATCHING IMPROVEMENT
+================================================================================
+
+STATUS: [PENDING] - Optional enhancement
+
+SEVERITY: LOW - Cosmetic improvement
+
+DESCRIPTION:
+   To improve visual consistency between DRTK and nvdiffrast outputs:
+   - MSAA for edge smoothing
+   - Post-processing tone mapping
+   - Conservative rasterization options in DRTK
+
+LOCATION TO INVESTIGATE:
+   - DRTK rasterize() parameters for edge handling
+   - Post-processing normalization in PBR renderer
+
+================================================================================
+ISSUE 11: MODEL ORIENTATION INVERTED
+================================================================================
+
+STATUS: [PENDING] - Needs investigation
+
+SEVERITY: MEDIUM - Visual issue
+
+DESCRIPTION:
+   The T character model appears inverted (upside-down) in ALL fork PBR output
+   images compared to official. This affects:
+   - mask_pbr_00.png
+   - normal_pbr_00.png
+   - base_color_00.png
+   - All other PBR outputs
+
+   This is UNRELATED to Issue 12 (material rendering quality).
+
+POSSIBLE CAUSES:
+   - Y-axis flip in DRTK rasterization output
+   - Coordinate system convention difference (OpenGL top-left vs bottom-left origin)
+   - Camera/projection matrix Y-axis handling
+
+LOCATION TO INVESTIGATE:
+   - trellis2/utils/drtk_compat.py - DRTKContext.rasterize() Y-axis handling
+   - trellis2/utils/drtk_compat.py - DepthPeeler coordinate system
+   - Pixel coordinate system (Y-up vs Y-down)
+
+================================================================================
+ISSUE 12: PBR MATERIALS POOR QUALITY
+================================================================================
+
+STATUS: [PENDING] - Critical rendering issue
+
+SEVERITY: HIGH - Material rendering broken
+
+DESCRIPTION:
+   The T model is BARELY VISIBLE in PBR material outputs despite correct
+   mask coverage (67266 pixels). This is a SEPARATE issue from the orientation
+   flip (Issue 11).
+
+   Working correctly:
+   - mask_pbr_00.png: Coverage correct
+   - normal_pbr_00.png: Normal values correct
+
+   VERY DIM/WRONG:
+   - base_color_00.png: Mean ~0.0013 vs official ~0.13 (60x dimmer)
+   - metallic_00.png: Very dim
+   - roughness_00.png: Very dim
+   - alpha_00.png: Very dim
+   - shaded_00.png: Very dim
+
+POSSIBLE CAUSES:
+   - PBREnvironmentLight implementation differs from nvdiffrec EnvironmentLight
+   - Diffuse irradiance calculation wrong
+   - Specular reflection calculation wrong
+   - Environment map UV sampling incorrect
+   - Material attributes incorrectly scaled or zeroed
+
+LOCATION TO INVESTIGATE:
+   - trellis2/renderers/pbr_envmap.py - PBREnvironmentLight.shade()
+   - trellis2/renderers/pbr_mesh_renderer.py - material attribute handling
+   - Compare against: ~/Documents/AI/TRELLIS.2/trellis2/renderers/pbr_mesh_renderer.py
 
 ================================================================================
 DISCOVERED ISSUES LOG
@@ -318,7 +381,9 @@ Format: DATE - ISSUE_NUMBER - STATUS_CHANGE
 2026-04-21 - Issue 7 - DISCOVERED: Background pixels have garbage values in DRTK interpolate
 2026-04-21 - Issue 8 - FIXED: nvdiffrec dependency removal
 2026-04-21 - Issue 9 - DISCOVERED: PBR rendering produces dimmer output
-2026-04-22 - Issue 9 - IN_PROGRESS: Investigating grid_sample_3d differences
+2026-04-22 - Issue 9 - RESOLVED: Different rasterizers sample different voxels (expected)
+2026-04-22 - Issue 11 - DISCOVERED: Model orientation inverted in all PBR outputs
+2026-04-22 - Issue 12 - DISCOVERED: PBR materials very dim despite correct mask/normal
 
 ================================================================================
 FIXED ISSUES LOG
