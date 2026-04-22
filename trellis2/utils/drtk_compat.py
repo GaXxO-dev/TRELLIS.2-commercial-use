@@ -253,17 +253,18 @@ def interpolate(
     
     h, w = rast.shape[1], rast.shape[2]
     
-    # Use cached outputs from DepthPeeler if available (highest priority)
-    if peeler is not None and peeler._cache_index_img is not None:
-        index_img = peeler._cache_index_img
+    # Always reconstruct index_img from rast[...,3] since it correctly encodes triangle ID
+    # (rast[...3] = index_img + 1 for geometry, 0 for background)
+    # The peeler cache may have index_img filtered to -1 for depth peeling purposes,
+    # but rast still has the original triangle IDs needed for attribute interpolation.
+    index_img = (rast[..., 3] - 1).to(torch.int32)
+    
+    # Use cached bary_img if available (DRTK barycentrics are more accurate than reconstruction)
+    if peeler is not None and peeler._cache_bary is not None:
         bary_img = peeler._cache_bary
-    # Use cached outputs from a DRTKContext if available
-    elif ctx is not None and ctx._cache_index_img is not None and ctx._cache_resolution == (h, w):
-        index_img = ctx._cache_index_img
+    elif ctx is not None and ctx._cache_bary is not None and ctx._cache_resolution == (h, w):
         bary_img = ctx._cache_bary
     else:
-        # Fall back to reconstructing from rast (less accurate but works for compatibility)
-        index_img = (rast[..., 3] - 1).to(torch.int32)
         u = rast[..., 0]
         v = rast[..., 1]
         w0 = 1.0 - u - v
@@ -477,6 +478,11 @@ class DepthPeeler:
         index_img = drtk.rasterize(v_pix, faces_int, height=h, width=w)
         depth, bary = drtk.render(v_pix, faces_int, index_img)
         
+        # Save ORIGINAL index_img BEFORE any filtering for use in rast[..., 3]
+        # This is needed because drtk.rasterize always returns the closest surface,
+        # but we need the original triangle IDs for attribute interpolation
+        original_index_img = index_img.clone()
+        
         # DRTK returns: depth [batch, H, W], bary [batch, 3, H, W]
         current_depth = depth[0]  # [H, W] camera-space depth
         
@@ -505,16 +511,19 @@ class DepthPeeler:
             )
         
         # Cache for interpolate
-        self._cache_index_img = index_img
+        self._cache_index_img = index_img  # This may be filtered for depth peeling
         self._cache_bary = bary
         
         # Build rast output in nvdiffrast format
         # DRTK returns: depth [batch, H, W], bary [batch, 3, H, W]
+        # IMPORTANT: rast[..., 3] should contain the ORIGINAL triangle ID (not filtered)
+        # so that interpolate() can reconstruct index_img from rast correctly
         rast = torch.zeros(batch_size, h, w, 4, device=device, dtype=torch.float32)
         rast[0, ..., 0] = bary[0, 1]  # u = weight for vertex 1
         rast[0, ..., 1] = bary[0, 2]  # v = weight for vertex 2
         rast[0, ..., 2] = depth[0]    # Camera-space depth for depth peeling
-        rast[0, ..., 3] = (index_img[0].float() + 1).float()
+        # Use UNFILTERED (original) index_img for rast[..., 3]
+        rast[0, ..., 3] = (original_index_img[0].float() + 1).float()
         
         rast_db = torch.zeros_like(rast)
         
