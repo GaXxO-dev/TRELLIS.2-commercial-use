@@ -728,6 +728,9 @@ class PBREnvironmentLight(torch.nn.Module):
             miplevel = self.get_mip(roughness)
             spec = sample_cubemap_mip(self.specular, reflvec, miplevel[..., 0])
             
+            # Blend specular toward diffuse for rough surfaces (matches nvdiffrec behavior)
+            spec = torch.lerp(spec, diffuse, roughness)
+            
             # Compute aggregate lighting (split-sum approximation)
             reflectance = spec_col * fg_lookup[..., 0:1] + fg_lookup[..., 1:2]
             shaded_col = shaded_col + spec * reflectance

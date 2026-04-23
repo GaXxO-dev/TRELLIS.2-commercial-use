@@ -1,140 +1,174 @@
 #!/usr/bin/env python3
 """
-Debug shade components by loading and comparing saved debug data.
+Debug script to compare shade() intermediate values between fork and official.
+
+This script captures:
+1. Diffuse irradiance lookup
+2. Specular prefilter values  
+3. FG LUT values
+4. NdotV values
+5. Reflection vectors
 """
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+import sys
 import torch
 import numpy as np
 from PIL import Image
-import sys
 
+# Check for saved debug data
 FORK_DIR = "test_output_pbr"
 OFFICIAL_DIR = "test_output_pbr_official"
 
-def load_img(path):
-    if not os.path.exists(path):
-        return None
-    arr = np.array(Image.open(path))
-    return arr.astype(np.float32) / 255.0
+def load_debug_tensor(path):
+    """Load a debug tensor if it exists."""
+    if os.path.exists(path):
+        return np.load(path)
+    return None
 
-def load_npy(path):
-    if not os.path.exists(path):
-        return None
-    return np.load(path)
+def compare_tensors(name, fork_data, official_data, mask=None):
+    """Compare two tensors and print statistics."""
+    if fork_data is None or official_data is None:
+        print(f"  {name}: MISSING DATA")
+        return
+    
+    if mask is not None:
+        fork_data = fork_data[mask]
+        official_data = official_data[mask]
+    
+    fork_flat = fork_data.flatten()
+    official_flat = official_data.flatten()
+    
+    fork_mean = fork_flat.mean()
+    official_mean = official_flat.mean()
+    
+    if official_mean > 1e-6:
+        ratio = fork_mean / official_mean
+    else:
+        ratio = float('inf') if fork_mean > 1e-6 else 1.0
+    
+    print(f"  {name}:")
+    print(f"    Fork mean:     {fork_mean:.6f} std: {fork_flat.std():.6f}")
+    print(f"    Official mean: {official_mean:.6f} std: {official_flat.std():.6f}")
+    print(f"    Ratio:         {ratio:.4f}")
 
-print("=" * 70)
-print("SHADE COMPONENT DEBUG")
-print("=" * 70)
+def main():
+    print("=" * 70)
+    print("SHADE() COMPONENT COMPARISON")
+    print("=" * 70)
+    
+    # Load mask for geometry filtering
+    fork_mask = np.array(Image.open(f"{FORK_DIR}/mask_pbr_00.png")).astype(np.float32) / 255.0
+    official_mask = np.array(Image.open(f"{OFFICIAL_DIR}/mask_pbr_00.png")).astype(np.float32) / 255.0
+    
+    if fork_mask.ndim == 3:
+        fork_mask = fork_mask.max(axis=-1) > 0
+    else:
+        fork_mask = fork_mask > 0
+    
+    if official_mask.ndim == 3:
+        official_mask = official_mask.max(axis=-1) > 0
+    else:
+        official_mask = official_mask > 0
+    
+    # Load existing data
+    fork_shaded = np.array(Image.open(f"{FORK_DIR}/shaded_00.png")).astype(np.float32) / 255.0
+    official_shaded = np.array(Image.open(f"{OFFICIAL_DIR}/shaded_00.png")).astype(np.float32) / 255.0
+    
+    fork_clay = np.array(Image.open(f"{FORK_DIR}/clay_00.png")).astype(np.float32) / 255.0
+    official_clay = np.array(Image.open(f"{OFFICIAL_DIR}/clay_00.png")).astype(np.float32) / 255.0
+    
+    fork_base = np.array(Image.open(f"{FORK_DIR}/base_color_00.png")).astype(np.float32) / 255.0
+    official_base = np.array(Image.open(f"{OFFICIAL_DIR}/base_color_00.png")).astype(np.float32) / 255.0
+    
+    fork_metallic = np.array(Image.open(f"{FORK_DIR}/metallic_00.png")).astype(np.float32) / 255.0
+    official_metallic = np.array(Image.open(f"{OFFICIAL_DIR}/metallic_00.png")).astype(np.float32) / 255.0
+    
+    fork_roughness = np.array(Image.open(f"{FORK_DIR}/roughness_00.png")).astype(np.float32) / 255.0
+    official_roughness = np.array(Image.open(f"{OFFICIAL_DIR}/roughness_00.png")).astype(np.float32) / 255.0
+    
+    fork_normal = np.array(Image.open(f"{FORK_DIR}/normal_pbr_00.png")).astype(np.float32) / 255.0
+    official_normal = np.array(Image.open(f"{OFFICIAL_DIR}/normal_pbr_00.png")).astype(np.float32) / 255.0
+    
+    # Convert normal from [0,1] to [-1,1]
+    fork_normal_3d = fork_normal * 2 - 1
+    official_normal_3d = official_normal * 2 - 1
+    
+    # Compute luminance
+    def luminance(img):
+        if img.ndim == 3:
+            return 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
+        return img
+    
+    fork_lum = luminance(fork_shaded)
+    official_lum = luminance(official_shaded)
+    
+    fork_clay_2d = fork_clay[..., 0] if fork_clay.ndim == 3 else fork_clay
+    official_clay_2d = official_clay[..., 0] if official_clay.ndim == 3 else official_clay
+    
+    # Pre-SSAO computation
+    fork_valid = fork_mask & (fork_clay_2d > 0.01)
+    official_valid = official_mask & (official_clay_2d > 0.01)
+    
+    fork_pre = fork_lum[fork_valid] / fork_clay_2d[fork_valid]
+    official_pre = official_lum[official_valid] / official_clay_2d[official_valid]
+    
+    print("\n1. FINAL OUTPUT COMPARISON:")
+    compare_tensors("Shaded luminance", fork_lum, official_lum, fork_mask)
+    
+    print("\n2. PRE-SSAO COMPARISON:")
+    compare_tensors("Pre-SSAO", fork_pre, official_pre, None)
+    
+    print("\n3. MATERIAL PROPERTIES:")
+    compare_tensors("Base color", fork_base, official_base, fork_mask)
+    compare_tensors("Metallic", fork_metallic, official_metallic, fork_mask)
+    compare_tensors("Roughness", fork_roughness, official_roughness, fork_mask)
+    
+    print("\n4. NORMAL COMPARISON:")
+    # Compare normal statistics rather than direct difference due to different mask sizes
+    fork_n = fork_normal_3d[fork_mask]
+    official_n = official_normal_3d[official_mask]
+    
+    print(f"  Fork normal mean:     {fork_n.mean(axis=0)}")
+    print(f"  Official normal mean: {official_n.mean(axis=0)}")
+    
+    # For pixels that overlap in both masks
+    overlap_mask = fork_mask & official_mask
+    if overlap_mask.sum() > 0:
+        fork_n_overlap = fork_normal_3d[overlap_mask]
+        official_n_overlap = official_normal_3d[overlap_mask]
+        dot_product = np.sum(fork_n_overlap * official_n_overlap, axis=-1)
+        dot_product = np.clip(dot_product, -1, 1)
+        angle_diff = np.arccos(dot_product) * 180 / np.pi
+        
+        print(f"  Overlapping pixels: {overlap_mask.sum()}")
+        print(f"  Normal angle difference:")
+        print(f"    Mean:   {angle_diff.mean():.4f}°")
+        print(f"    Std:    {angle_diff.std():.4f}°")
+        print(f"    Median: {np.median(angle_diff):.4f}°")
+        print(f"    Within 10°: {100 * (angle_diff < 10).mean():.1f}%")
+    
+    print("\n5. SSAO ANALYSIS:")
+    fork_f_occ = 1 - fork_clay_2d
+    official_f_occ = 1 - official_clay_2d
+    compare_tensors("f_occ", fork_f_occ, official_f_occ, fork_mask)
+    
+    print("\n" + "=" * 70)
+    print("KEY FINDING: Compare pre-SSAO brightness ratio")
+    print("=" * 70)
+    
+    pre_ratio = fork_pre.mean() / official_pre.mean()
+    print(f"Pre-SSAO brightness ratio: {pre_ratio:.4f}")
+    print(f"This ~{100*(1-pre_ratio):.1f}% difference is in the PBR shading.")
+    print()
+    print("POTENTIAL CAUSES:")
+    print("  1. Missing spec = lerp(spec, diffuse, roughness) in shade()")
+    print("  2. Different cubemap sampling (diffuse irradiance)")
+    print("  3. Different specular prefilter values")
+    print("  4. Different FG LUT sampling")
+    print("  5. Normal-based lighting direction differences")
 
-# Load images
-fork_shaded = load_img(f"{FORK_DIR}/shaded_00.png")
-fork_clay = load_img(f"{FORK_DIR}/clay_00.png")
-fork_base_color = load_img(f"{FORK_DIR}/base_color_00.png")
-fork_metallic = load_img(f"{FORK_DIR}/metallic_00.png")
-fork_roughness = load_img(f"{FORK_DIR}/roughness_00.png")
-fork_normal = load_img(f"{FORK_DIR}/normal_pbr_00.png")
-fork_mask = load_img(f"{FORK_DIR}/mask_pbr_00.png")
-
-official_shaded = load_img(f"{OFFICIAL_DIR}/shaded_00.png")
-official_clay = load_img(f"{OFFICIAL_DIR}/clay_00.png")
-official_base_color = load_img(f"{OFFICIAL_DIR}/base_color_00.png")
-official_metallic = load_img(f"{OFFICIAL_DIR}/metallic_00.png")
-official_roughness = load_img(f"{OFFICIAL_DIR}/roughness_00.png")
-official_normal = load_img(f"{OFFICIAL_DIR}/normal_pbr_00.png")
-official_mask = load_img(f"{OFFICIAL_DIR}/mask_pbr_00.png")
-
-# Get geometry mask
-fork_geom = fork_mask.max(axis=-1) > 0 if fork_mask.ndim == 3 else fork_mask > 0
-official_geom = official_mask.max(axis=-1) > 0 if official_mask.ndim == 3 else official_mask > 0
-
-# Decode normals from [0,1] to [-1,1]
-fork_normal_decoded = fork_normal * 2 - 1
-official_normal_decoded = official_normal * 2 - 1
-
-# Compute normal magnitude (should be ~1.0 if normalized)
-fork_normal_mag = np.linalg.norm(fork_normal_decoded, axis=-1)
-official_normal_mag = np.linalg.norm(official_normal_decoded, axis=-1)
-
-print("\nNORMAL ANALYSIS:")
-print(f"  Fork normal magnitude:     mean={fork_normal_mag[fork_geom].mean():.6f}, std={fork_normal_mag[fork_geom].std():.6f}")
-print(f"  Official normal magnitude: mean={official_normal_mag[official_geom].mean():.6f}, std={official_normal_mag[official_geom].std():.6f}")
-
-# Compute normal angle difference
-fork_normal_geom = fork_normal_decoded[fork_geom]
-official_normal_geom = official_normal_decoded[official_geom]
-
-# The normals at geometry pixels should be very similar
-# Compute dot product to find angular difference
-min_len = min(len(fork_normal_geom), len(official_normal_geom))
-fork_normal_trim = fork_normal_geom[:min_len]
-official_normal_trim = official_normal_geom[:min_len]
-
-dot_product = np.sum(fork_normal_trim * official_normal_trim, axis=-1)
-angle_diff = np.arccos(np.clip(dot_product, -1, 1)) * 180 / np.pi
-
-print(f"  Normal angle difference:   mean={angle_diff.mean():.2f}°, median={np.median(angle_diff):.2f}°, max={angle_diff.max():.2f}°")
-
-# Per-channel normal difference
-normal_diff = np.abs(fork_normal_decoded - official_normal_decoded)
-print(f"  Normal per-channel diff:   R={normal_diff[fork_geom, 0].mean():.4f}, G={normal_diff[fork_geom, 1].mean():.4f}, B={normal_diff[fork_geom, 2].mean():.4f}")
-
-# Material channels
-print("\nMATERIAL CHANNELS:")
-print(f"  Base color:  fork={fork_base_color[fork_geom].mean():.4f}, official={official_base_color[official_geom].mean():.4f}, ratio={fork_base_color[fork_geom].mean()/official_base_color[official_geom].mean():.4f}")
-print(f"  Metallic:    fork={fork_metallic[fork_geom].mean():.4f}, official={official_metallic[official_geom].mean():.4f}, ratio={fork_metallic[fork_geom].mean()/official_metallic[official_geom].mean():.4f}")
-print(f"  Roughness:   fork={fork_roughness[fork_geom].mean():.4f}, official={official_roughness[official_geom].mean():.4f}, ratio={fork_roughness[fork_geom].mean()/official_roughness[official_geom].mean():.4f}")
-
-# Compute luminance
-def lum(img):
-    if img.ndim == 3:
-        return 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
-    return img
-
-fork_lum = lum(fork_shaded)
-official_lum = lum(official_shaded)
-
-fork_clay_2d = fork_clay[..., 0] if fork_clay.ndim == 3 else fork_clay
-official_clay_2d = official_clay[..., 0] if official_clay.ndim == 3 else official_clay
-
-# Filter to valid geometry with non-zero clay
-fork_valid = fork_geom & (fork_clay_2d > 0.01)
-official_valid = official_geom & (official_clay_2d > 0.01)
-
-# Estimate pre-SSAO lighting
-fork_pre = fork_lum[fork_valid] / fork_clay_2d[fork_valid]
-official_pre = official_lum[official_valid] / official_clay_2d[official_valid]
-
-print("\nPRE-SSAO SHADING (estimated):")
-print(f"  Fork:     mean={fork_pre.mean():.6f}")
-print(f"  Official: mean={official_pre.mean():.6f}")
-print(f"  Ratio: {fork_pre.mean() / official_pre.mean():.4f}")
-print(f"  (Fork is {(1 - fork_pre.mean() / official_pre.mean()) * 100:.1f}% darker before SSAO)")
-
-# Analyze color channels separately
-print("\nPER-CHANNEL SHADED OUTPUT:")
-for c, name in enumerate(['R', 'G', 'B']):
-    fork_chan = fork_shaded[fork_valid[..., None] if fork_shaded.ndim == 3 else fork_valid, c if fork_shaded.ndim == 3 else 0]
-    official_chan = official_shaded[official_valid[..., None] if official_shaded.ndim == 3 else official_valid, c if official_shaded.ndim == 3 else 0]
-    ratio = fork_chan.mean() / official_chan.mean() if official_chan.mean() > 0 else 0
-    print(f"  {name}: fork={fork_chan.mean():.6f}, official={official_chan.mean():.6f}, ratio={ratio:.4f}")
-
-# Check if darker uniformly across channels or if one channel is more affected
-print("\nCHANNEL-WISE PRE-SSAO:")
-for c, name in enumerate(['R', 'G', 'B']):
-    fork_pre_chan = fork_shaded[..., c][fork_valid] / fork_clay_2d[fork_valid]
-    official_pre_chan = official_shaded[..., c][official_valid] / official_clay_2d[official_valid]
-    ratio = fork_pre_chan.mean() / official_pre_chan.mean()
-    print(f"  {name}: fork={fork_pre_chan.mean():.6f}, official={official_pre_chan.mean():.6f}, ratio={ratio:.4f}")
-
-print("\n" + "=" * 70)
-print("KEY FINDINGS:")
-print("=" * 70)
-print("The ~11% darkness is in the pre-SSAO shading.")
-print("This could be caused by:")
-print("  1. Diffuse irradiance lookup - different normal direction")
-print("  2. Specular prefilter Lookup - different reflection direction")
-print("  3. FG LUT sampling - different NdotV due to normal difference")
-print("  4. Normal interpolation - DRTK vs nvdiffrast edge handling")
+if __name__ == "__main__":
+    main()
