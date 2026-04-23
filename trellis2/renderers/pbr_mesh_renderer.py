@@ -9,12 +9,12 @@ from ..utils.drtk_compat import RasterizeCudaContext, interpolate, texture, Dept
 
 
 def cube_to_dir(s, x, y):
-    if s == 0:   rx, ry, rz = torch.ones_like(x), -y, -x
-    elif s == 1: rx, ry, rz = -torch.ones_like(x), -y, x
-    elif s == 2: rx, ry, rz = x, torch.ones_like(x), y
-    elif s == 3: rx, ry, rz = x, -torch.ones_like(x), -y
-    elif s == 4: rx, ry, rz = x, -y, torch.ones_like(x)
-    elif s == 5: rx, ry, rz = -x, -y, -torch.ones_like(x)
+    if s == 0:   rx, ry, rz = torch.ones_like(x), -x, -y
+    elif s == 1: rx, ry, rz = -torch.ones_like(x), x, -y
+    elif s == 2: rx, ry, rz = x, y, torch.ones_like(x)
+    elif s == 3: rx, ry, rz = x, -y, -torch.ones_like(x)
+    elif s == 4: rx, ry, rz = x, torch.ones_like(x), -y
+    elif s == 5: rx, ry, rz = -x, -torch.ones_like(x), -y
     return torch.stack((rx, ry, rz), dim=-1)
 
 

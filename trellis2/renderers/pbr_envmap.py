@@ -33,26 +33,26 @@ def dot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def cube_to_dir(s: int, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Convert cube face coordinates to 3D direction vectors.
     
-    Convention matches nvdiffrec:
-    Face 0 (+X): direction (1, -y, -x) maps UV (x,y)
-    Face 1 (-X): direction (-1, -y, x) maps UV (x,y)
-    Face 2 (+Y): direction (x, 1, y) maps UV (x,y)
-    Face 3 (-Y): direction (x, -1, -y) maps UV (x,y)
-    Face 4 (+Z): direction (x, -y, 1) maps UV (x,y)
-    Face 5 (-Z): direction (-x, -y, -1) maps UV (x,y)
+    Convention matches nvdiffrast/nvdiffrec:
+    Face 0 (+X): direction (1, -x, -y) maps UV (x,y)
+    Face 1 (-X): direction (-1, x, -y) maps UV (x,y)
+    Face 2 (+Y): direction (x, y, 1) maps UV (x,y)
+    Face 3 (-Y): direction (x, -y, -1) maps UV (x,y)
+    Face 4 (+Z): direction (x, 1, -y) maps UV (x,y)
+    Face 5 (-Z): direction (-x, -1, -y) maps UV (x,y)
     """
     if s == 0:
-        rx, ry, rz = torch.ones_like(x), -y, -x
+        rx, ry, rz = torch.ones_like(x), -x, -y
     elif s == 1:
-        rx, ry, rz = -torch.ones_like(x), -y, x
+        rx, ry, rz = -torch.ones_like(x), x, -y
     elif s == 2:
-        rx, ry, rz = x, torch.ones_like(x), y
+        rx, ry, rz = x, y, torch.ones_like(x)
     elif s == 3:
-        rx, ry, rz = x, -torch.ones_like(x), -y
+        rx, ry, rz = x, -y, -torch.ones_like(x)
     elif s == 4:
-        rx, ry, rz = x, -y, torch.ones_like(x)
+        rx, ry, rz = x, torch.ones_like(x), -y
     elif s == 5:
-        rx, ry, rz = -x, -y, -torch.ones_like(x)
+        rx, ry, rz = -x, -torch.ones_like(x), -y
     return torch.stack((rx, ry, rz), dim=-1)
 
 
@@ -61,13 +61,13 @@ def dir_to_cube_face_and_uv(directions: torch.Tensor) -> Tuple[torch.Tensor, tor
     
     Fully vectorized - no Python loops over faces.
     
-    Convention matches nvdiffrec cube_to_dir:
-    Face 0 (+X): (1, -y, -x) maps UV (x,y), so direction (dx, dy, dz) -> u=-dz/|dx|, v=-dy/|dx|
-    Face 1 (-X): (-1, -y, x) maps UV (x,y), so direction -> u=dz/|dx|, v=-dy/|dx|
-    Face 2 (+Y): (x, 1, y) maps UV (x,y), so direction -> u=dx/|dy|, v=dz/|dy|
-    Face 3 (-Y): (x, -1, -y) maps UV (x,y), so direction -> u=dx/|dy|, v=-dz/|dy|
-    Face 4 (+Z): (x, -y, 1) maps UV (x,y), so direction -> u=dx/|dz|, v=-dy/|dz|
-    Face 5 (-Z): (-x, -y, -1) maps UV (x,y), so direction -> u=-dx/|dz|, v=-dy/|dz|
+    Convention matches cube_to_dir:
+    Face 0 (+X): cube_to_dir(0, x, y) = (1, -x, -y) -> direction = (1, -u, -v)/||.||
+    Face 1 (-X): cube_to_dir(1, x, y) = (-1, x, -y) -> direction = (-1, u, -v)/||.||
+    Face 2 (+Z): cube_to_dir(2, x, y) = (x, y, 1) -> direction = (u, v, 1)/||.||
+    Face 3 (-Z): cube_to_dir(3, x, y) = (x, -y, -1) -> direction = (u, -v, -1)/||.||
+    Face 4 (+Y): cube_to_dir(4, x, y) = (x, 1, -y) -> direction = (u, 1, -v)/||.||
+    Face 5 (-Y): cube_to_dir(5, x, y) = (-x, -1, -y) -> direction = (-u, -1, -v)/||.||
     
     Args:
         directions: [..., 3] normalized direction vectors (x, y, z) = (dx, dy, dz)
@@ -84,34 +84,98 @@ def dir_to_cube_face_and_uv(directions: torch.Tensor) -> Tuple[torch.Tensor, tor
     abs_z = torch.abs(z)
     
     # Determine which axis is dominant
+    # Face assignment: 0=+X, 1=-X, 2=+Z, 3=-Z, 4=+Y, 5=-Y
+    # This matches cube_to_dir where s=2 gives +Z direction and s=4 gives +Y direction
     is_x_major = (abs_x >= abs_y) & (abs_x >= abs_z)
-    is_y_major = (~is_x_major) & (abs_y >= abs_z)
-    is_z_major = ~is_x_major & ~is_y_major
+    is_z_major = (~is_x_major) & (abs_z >= abs_y)
+    is_y_major = ~is_x_major & ~is_z_major
     
     # Compute UV coordinates for each face projection
     # These are inverses of cube_to_dir mappings
     
-    # For X-major faces (0: +X, 1: -X)
-    # +X: (1, -y, -x), so u=-z/x, v=-y/x for x>0
-    # -X: (-1, -y, x), so u=z/|x|, v=-y/|x| for x<0
-    u_x = torch.where(x > 0, (-z / abs_x + 1) * 0.5, (z / abs_x + 1) * 0.5)
-    v_x = (-y / abs_x + 1) * 0.5
+    # For X-major faces (0: +X when x>0, 1: -X when x<0)
+    # cube_to_dir(0, x, y) = (1, -x, -y) so u=-y, v=-... 
+    # From direction (dx, dy, dz): y_input = -dy/|dx|, z_input (actually unused) from -y = -dz
+    # Actually: direction = normalize(1, -u_input, -v_input)
+    # So: u_input = -dy/|dx|, v_input = -dz/|dx|
+    # UV coords: u = (u_input+1)/2 = (-dy/|dx|+1)/2, v = (v_input+1)/2 = (-dz/|dx|+1)/2
     
-    # For Y-major faces (2: +Y, 3: -Y)
-    # +Y: (x, 1, y), so u=x/|y|, v=z/|y|
-    # -Y: (x, -1, -y), so u=x/|y|, v=-z/|y|
-    u_y = (x / abs_y + 1) * 0.5
-    v_y = torch.where(y > 0, (z / abs_y + 1) * 0.5, (-z / abs_y + 1) * 0.5)
+    # For +X face (dx > 0): u = (-dy/|dx|+1)/2, v = (-dz/|dx|+1)/2
+    # For -X face (dx < 0): cube_to_dir(1, u, v) = (-1, u, -v)
+    #                       so: u_input = dy/|dx|, v_input = -dz/|dx|
+    #                       UV: u = (dy/|dx|+1)/2, v = (-dz/|dx|+1)/2
     
-    # For Z-major faces (4: +Z, 5: -Z)
-    # +Z: (x, -y, 1), so u=x/|z|, v=-y/|z|
-    # -Z: (-x, -y, -1), so u=-x/|z|, v=-y/|z|
-    u_z = torch.where(z > 0, (x / abs_z + 1) * 0.5, (-x / abs_z + 1) * 0.5)
-    v_z = (-y / abs_z + 1) * 0.5
+    u_for_pos_x = (-y / abs_x + 1) * 0.5  # u = (-dy/|dx|+1)/2
+    v_for_pos_x = (-z / abs_x + 1) * 0.5   # v = (-dz/|dx|+1)/2
+    u_for_neg_x = (y / abs_x + 1) * 0.5    # u = (dy/|dx|+1)/2
+    v_for_neg_x = (-z / abs_x + 1) * 0.5   # v = (-dz/|dx|+1)/2
+    
+    u_x = torch.where(x > 0, u_for_pos_x, u_for_neg_x)
+    v_x = torch.where(x > 0, v_for_pos_x, v_for_neg_x)
+    
+    # For Z-major faces (2: +Z when z>0, 3: -Z when z<0)
+    # cube_to_dir(2, u, v) = (u, v, 1) so direction = normalize(dx, dy, dz) with dz > 0
+    # u_input = dx/|dz|, v_input = dy/|dz|
+    # UV: u = (dx/|dz|+1)/2, v = (dy/|dz|+1)/2
+    #
+    # cube_to_dir(3, u, v) = (u, -v, -1) so direction with dz < 0
+    # u_input = dx/|dz|, v_input = -dy/|dz|
+    # UV: u = (dx/|dz|+1)/2, v = (-dy/|dz|+1)/2
+    
+    u_for_pos_z = (x / abs_z + 1) * 0.5
+    v_for_pos_z = (y / abs_z + 1) * 0.5
+    u_for_neg_z = (x / abs_z + 1) * 0.5
+    v_for_neg_z = (-y / abs_z + 1) * 0.5
+    
+    u_z = torch.where(z > 0, u_for_pos_z, u_for_neg_z)
+    v_z = torch.where(z > 0, v_for_pos_z, v_for_neg_z)
+    
+    # For Y-major faces (4: +Y when y>0, 5: -Y when y<0)
+    # cube_to_dir(4, u, v) = (u, 1, -v) so direction with dy > 0
+    # u_input = dx/|dy|, v_input = -dz/|dy|
+    # UV: u = (dx/|dy|+1)/2, v = (-dz/|dy|+1)/2
+    #
+    # cube_to_dir(5, u, v) = (-u, -1, -v) so direction with dy < 0
+    # u_input = -dx/|dy|, v_input = -dz/|dy|
+    # UV: u = (-dx/|dy|+1)/2, v = (-dz/|dy|+1)/2
+    
+    u_for_pos_y = (x / abs_y + 1) * 0.5
+    v_for_pos_y = (-z / abs_y + 1) * 0.5
+    u_for_neg_y = (-x / abs_y + 1) * 0.5
+    v_for_neg_y = (-z / abs_y + 1) * 0.5
+    
+    u_y = torch.where(y > 0, u_for_pos_y, u_for_neg_y)
+    v_y = torch.where(y > 0, v_for_pos_y, v_for_neg_y)
     
     # Select UV based on dominant axis
-    u = torch.where(is_x_major, u_x, torch.where(is_y_major, u_y, u_z))
-    v = torch.where(is_x_major, v_x, torch.where(is_y_major, v_y, v_z))
+    u = torch.where(is_x_major, u_x, torch.where(is_z_major, u_z, u_y))
+    v = torch.where(is_x_major, v_x, torch.where(is_z_major, v_z, v_y))
+    
+    # Compute face indices: 0=+X, 1=-X, 2=+Z, 3=-Z, 4=+Y, 5=-Y
+    faces = torch.where(
+        is_x_major,
+        torch.where(x > 0, torch.tensor(0, device=directions.device), torch.tensor(1, device=directions.device)),
+        torch.where(
+            is_z_major,
+            torch.where(z > 0, torch.tensor(2, device=directions.device), torch.tensor(3, device=directions.device)),
+            torch.where(y > 0, torch.tensor(4, device=directions.device), torch.tensor(5, device=directions.device))
+        )
+    )
+    
+    return faces.long(), u, v
+    
+    # Compute face indices: 0=+X, 1=-X, 2=+Z, 3=-Z, 4=+Y, 5=-Y
+    faces = torch.where(
+        is_x_major,
+        torch.where(x > 0, torch.tensor(0, device=directions.device), torch.tensor(1, device=directions.device)),
+        torch.where(
+            is_z_major,
+            torch.where(z > 0, torch.tensor(2, device=directions.device), torch.tensor(3, device=directions.device)),
+            torch.where(y > 0, torch.tensor(4, device=directions.device), torch.tensor(5, device=directions.device))
+        )
+    )
+    
+    return faces.long(), u, v
     
     # Compute face indices
     faces = torch.where(
