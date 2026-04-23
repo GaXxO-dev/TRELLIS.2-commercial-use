@@ -450,20 +450,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             **cond,
             **sampler_params,
             verbose=True,
-            tqdm_desc="Sampling shape SLat",
+            tqdm_desc="Sampling texture SLat",
         ).samples
         if self.low_vram:
             flow_model.cpu()
 
         if is_debug_enabled():
-            dbg_tensor(next_step(), "P6_shape_slat_sampled", slat.feats)
+            dbg_tensor(next_step(), "P6_texture_slat_sampled", slat.feats)
 
-        std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
-        mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
+        std = torch.tensor(self.tex_slat_normalization['std'])[None].to(slat.device)
+        mean = torch.tensor(self.tex_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
         
         if is_debug_enabled():
-            dbg_tensor(next_step(), "P7_shape_slat_denormed", slat.feats)
+            dbg_tensor(next_step(), "P7_texture_slat_denormed", slat.feats)
         
         return slat
 
