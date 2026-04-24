@@ -174,6 +174,7 @@ def run_benchmark():
         timings['pbr_render'] = timer.stop()
         
         # Step 9-12: GLB Export (timed internally by o_voxel)
+        torch.cuda.empty_cache()
         torch.cuda.synchronize()
         o_voxel.postprocess.enable_benchmark()
         timer.start()

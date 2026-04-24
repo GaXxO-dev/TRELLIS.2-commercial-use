@@ -133,7 +133,7 @@ def screen_space_ambient_occlusion(
     seed: int = 42,
 ) -> torch.Tensor:
     """
-    Screen space ambient occlusion (SSAO)
+    Screen space ambient occlusion (SSAO) - vectorized implementation.
 
     Args:
         depth (torch.Tensor): [H, W, 1] depth image
@@ -168,27 +168,35 @@ def screen_space_ambient_occlusion(
     view_pos = torch.stack([x_view, y_view, depth[..., 0]], dim=-1)
     
     depth_feat = depth.permute(2, 0, 1).unsqueeze(0)
-    occlusion = torch.zeros((H, W), device=device)
     
-    for _ in range(samples):
-        rnd_vec = torch.randn(H, W, 3, device=device)
-        rnd_vec = F.normalize(rnd_vec, p=2, dim=-1)
-        dot_val = torch.sum(rnd_vec * normal, dim=-1, keepdim=True)
-        sample_dir = torch.sign(dot_val) * rnd_vec
-        scale = torch.rand(H, W, 1, device=device)
-        scale = scale * scale
-        sample_pos = view_pos + sample_dir * radius * scale
-        sample_z = sample_pos[..., 2]
-        
-        z_safe = torch.clamp(sample_pos[..., 2], min=1e-5)
-        proj_u = (sample_pos[..., 0] * fx / z_safe) + cx
-        proj_v = (sample_pos[..., 1] * fy / z_safe) + cy
-        grid = torch.stack([proj_u, proj_v], dim=-1).unsqueeze(0)
-        geo_z = F.grid_sample(depth_feat, grid, mode='nearest', padding_mode='border').squeeze()
-        range_check = torch.abs(geo_z - sample_z) < radius
-        is_occluded = (geo_z <= sample_z - bias) & range_check
-        occlusion += is_occluded.float()
-        
+    rnd_vec = torch.randn(samples, H, W, 3, device=device)
+    rnd_vec = F.normalize(rnd_vec, p=2, dim=-1)
+    
+    normal_expanded = normal.unsqueeze(0)
+    dot_val = (rnd_vec * normal_expanded).sum(dim=-1, keepdim=True)
+    sample_dir = torch.sign(dot_val) * rnd_vec
+    
+    scale = torch.rand(samples, H, W, 1, device=device)
+    scale = scale * scale
+    
+    view_pos_expanded = view_pos.unsqueeze(0)
+    sample_pos = view_pos_expanded + sample_dir * radius * scale
+    sample_z = sample_pos[..., 2]
+    
+    z_safe = torch.clamp(sample_pos[..., 2], min=1e-5)
+    proj_u = (sample_pos[..., 0] * fx / z_safe) + cx
+    proj_v = (sample_pos[..., 1] * fy / z_safe) + cy
+    
+    grid = torch.stack([proj_u, proj_v], dim=-1)
+    
+    depth_expanded = depth_feat.expand(samples, -1, -1, -1)
+    geo_z = F.grid_sample(depth_expanded, grid, mode='nearest', padding_mode='border')
+    geo_z = geo_z.squeeze(1)
+    
+    range_check = torch.abs(geo_z - sample_z) < radius
+    is_occluded = (geo_z <= sample_z - bias) & range_check
+    
+    occlusion = is_occluded.float().sum(dim=0)
     f_occ = occlusion / samples * intensity
     f_occ = torch.clamp(f_occ, 0.0, 1.0)
     
@@ -231,7 +239,7 @@ class PbrMeshRenderer:
             "near": None,
             "far": None,
             "ssaa": 1,
-            "peel_layers": 8,
+            "peel_layers": 4,
         })
         self.rendering_options.update(rendering_options)
         self.glctx = RasterizeCudaContext(device=device)

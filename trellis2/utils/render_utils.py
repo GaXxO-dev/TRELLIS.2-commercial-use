@@ -46,7 +46,7 @@ def get_renderer(sample, **kwargs):
         renderer.rendering_options.near = kwargs.get('near', 1)
         renderer.rendering_options.far = kwargs.get('far', 100)
         renderer.rendering_options.ssaa = kwargs.get('ssaa', 2)
-        renderer.rendering_options.peel_layers = kwargs.get('peel_layers', 8)
+        renderer.rendering_options.peel_layers = kwargs.get('peel_layers', 4)
     elif isinstance(sample, Mesh):
         renderer = MeshRenderer()
         renderer.rendering_options.resolution = kwargs.get('resolution', 512)

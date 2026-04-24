@@ -192,7 +192,7 @@ def dir_to_cube_face_and_uv(directions: torch.Tensor) -> Tuple[torch.Tensor, tor
 
 
 def sample_cubemap(cubemap: torch.Tensor, directions: torch.Tensor) -> torch.Tensor:
-    """Sample a cubemap given direction vectors - fully vectorized.
+    """Sample a cubemap given direction vectors - optimized batch version.
     
     Args:
         cubemap: [6, H, W, C] cubemap faces (0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z)
@@ -210,39 +210,32 @@ def sample_cubemap(cubemap: torch.Tensor, directions: torch.Tensor) -> torch.Ten
     
     faces, u, v = dir_to_cube_face_and_uv(directions_flat)
     
-    # Convert to grid_sample coordinates [-1, 1]
     grid_x = u * 2 - 1
     grid_y = v * 2 - 1
     
-    # Process all 6 faces in parallel
-    # For each face, we need to sample and then select based on which face each pixel belongs to
     result = torch.zeros(N, C, dtype=cubemap.dtype, device=cubemap.device)
     
-    # Stack all 6 faces as [6, C, H, W]
     cubemap_chw = cubemap.permute(0, 3, 1, 2)  # [6, C, H, W]
     
-    for face_idx in range(6):
+    grid_2d = torch.stack([grid_x, grid_y], dim=-1)  # [N, 2]
+    
+    unique_faces = faces.unique()
+    
+    for face_idx in unique_faces:
         mask = faces == face_idx
-        if not mask.any():
-            continue
+        idx = torch.where(mask)[0]
         
-        # Get directions for this face
-        face_dirs = directions_flat[mask]
-        face_n = face_dirs.shape[0]
+        face_grid = grid_2d[mask].unsqueeze(0).unsqueeze(2)  # [1, count, 1, 2]
         
-        # Get UV for this face
-        face_grid_x = grid_x[mask]
-        face_grid_y = grid_y[mask]
-        
-        # Create grid for grid_sample: [1, N, 1, 2]
-        face_grid = torch.stack([face_grid_x, face_grid_y], dim=-1).unsqueeze(0).unsqueeze(2)
-        
-        # Sample from this face
         face_chw = cubemap_chw[face_idx:face_idx+1]  # [1, C, H, W]
-        sampled = F.grid_sample(face_chw, face_grid, mode='bilinear', padding_mode='border', align_corners=True)
-        # sampled: [1, C, N, 1]
         
-        result[mask] = sampled[0, :, :, 0].permute(1, 0)
+        count = idx.shape[0]
+        face_grid_expanded = face_grid.expand(1, -1, 1, -1)
+        
+        sampled = F.grid_sample(face_chw, face_grid_expanded, mode='bilinear', padding_mode='border', align_corners=True)
+        # sampled: [1, C, count, 1]
+        
+        result[idx] = sampled[0, :, :, 0].T
     
     return result.reshape(*original_shape, C)
 
