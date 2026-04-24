@@ -13,6 +13,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'trellis2
 from utils.drtk_compat import RasterizeCudaContext, interpolate
 import cumesh
 
+# Benchmark timing support
+_BENCHMARK_TIMINGS = {}
+_BENCHMARK_ENABLED = False
+
+def enable_benchmark():
+    global _BENCHMARK_ENABLED, _BENCHMARK_TIMINGS
+    _BENCHMARK_ENABLED = True
+    _BENCHMARK_TIMINGS = {}
+
+def disable_benchmark():
+    global _BENCHMARK_ENABLED
+    _BENCHMARK_ENABLED = False
+
+def get_benchmark_timings():
+    return dict(_BENCHMARK_TIMINGS)
+
+def _cuda_timer_start():
+    start = torch.cuda.Event(enable_timing=True)
+    start.record()
+    return start
+
+def _cuda_timer_end(start):
+    end = torch.cuda.Event(enable_timing=True)
+    end.record()
+    torch.cuda.synchronize()
+    return start.elapsed_time(end)
+
 
 def to_glb(
     vertices: torch.Tensor,
@@ -92,6 +119,9 @@ def to_glb(
     assert isinstance(grid_size, torch.Tensor)
     assert grid_size.dim() == 1 and grid_size.size(0) == 3
     
+    # Benchmark: start total
+    total_start = _cuda_timer_start() if _BENCHMARK_ENABLED else None
+    
     if use_tqdm:
         pbar = tqdm(total=6, desc="Extracting GLB")
     if verbose:
@@ -100,6 +130,9 @@ def to_glb(
     vertices = vertices.cuda()
     faces = faces.cuda()
     
+    # Benchmark: fill_holes + BVH
+    step_start = _cuda_timer_start() if _BENCHMARK_ENABLED else None
+    
     mesh = cumesh.CuMesh()
     mesh.init(vertices, faces)
     
@@ -107,14 +140,22 @@ def to_glb(
     if verbose:
         print(f"After filling holes: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
     vertices, faces = mesh.read()
+    
     if use_tqdm:
         pbar.update(1)
+    if _BENCHMARK_ENABLED:
+        _BENCHMARK_TIMINGS['glb_fill_holes'] = _cuda_timer_end(step_start)
         
     if use_tqdm:
         pbar.set_description("Building BVH")
     if verbose:
         print(f"Building BVH for current mesh...", end='', flush=True)
+    
+    step_start = _cuda_timer_start() if _BENCHMARK_ENABLED else None
     bvh = cumesh.cuBVH(vertices, faces)
+    if _BENCHMARK_ENABLED:
+        _BENCHMARK_TIMINGS['glb_bvh'] = _cuda_timer_end(step_start)
+    
     if use_tqdm:
         pbar.update(1)
     if verbose:
@@ -124,6 +165,8 @@ def to_glb(
         pbar.set_description("Cleaning mesh")
     if verbose:
         print("Cleaning mesh...")
+    
+    step_start = _cuda_timer_start() if _BENCHMARK_ENABLED else None
     
     if not remesh:
         mesh.simplify(decimation_target * 3, verbose=verbose)
@@ -171,6 +214,9 @@ def to_glb(
         if verbose:
             print(f"After simplifying: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
     
+    if _BENCHMARK_ENABLED:
+        _BENCHMARK_TIMINGS['glb_remesh'] = _cuda_timer_end(step_start)
+    
     if use_tqdm:
         pbar.update(1)
     if verbose:
@@ -181,6 +227,7 @@ def to_glb(
     if verbose:
         print("Parameterizing new mesh...")
     
+    step_start = _cuda_timer_start() if _BENCHMARK_ENABLED else None
     out_vertices, out_faces, out_uvs, out_vmaps = mesh.uv_unwrap(
         compute_charts_kwargs={
             "threshold_cone_half_angle_rad": mesh_cluster_threshold_cone_half_angle_rad,
@@ -207,6 +254,9 @@ def to_glb(
         out_normals = torch.where(zero_mask, F.normalize(out_vertices, dim=-1), out_normals)
     out_normals = torch.nn.functional.normalize(out_normals, dim=-1)
     
+    if _BENCHMARK_ENABLED:
+        _BENCHMARK_TIMINGS['glb_uv_unwrap'] = _cuda_timer_end(step_start)
+    
     if use_tqdm:
         pbar.update(1)
     if verbose:
@@ -216,6 +266,8 @@ def to_glb(
         pbar.set_description("Sampling attributes")
     if verbose:
         print("Sampling attributes...", end='', flush=True)
+    
+    step_start = _cuda_timer_start() if _BENCHMARK_ENABLED else None
         
     # Setup DRTK rasterizer context
     ctx = RasterizeCudaContext()
@@ -252,11 +304,17 @@ def to_glb(
         grid=((valid_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
         mode='trilinear',
     )
+    
+    if _BENCHMARK_ENABLED:
+        _BENCHMARK_TIMINGS['glb_texture_bake'] = _cuda_timer_end(step_start)
+    
     if use_tqdm:
         pbar.update(1)
     if verbose:
         print("Done")
     
+    step_start = _cuda_timer_start() if _BENCHMARK_ENABLED else None
+        
     if use_tqdm:
         pbar.set_description("Finalizing mesh")
     if verbose:
@@ -307,6 +365,10 @@ def to_glb(
         process=False,
         visual=trimesh.visual.TextureVisuals(uv=uvs_np, material=material)
     )
+    
+    if _BENCHMARK_ENABLED:
+        _BENCHMARK_TIMINGS['glb_finalize'] = _cuda_timer_end(step_start)
+        _BENCHMARK_TIMINGS['glb_total'] = _cuda_timer_end(total_start)
     
     if use_tqdm:
         pbar.update(1)
