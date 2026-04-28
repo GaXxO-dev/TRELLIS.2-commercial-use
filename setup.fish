@@ -177,7 +177,7 @@ if test "$DRTK" = "true"
     sed -i 's|"src/render/render_kernel.cu", "src/render/render_module.cpp"|"src/render/render_kernel.cu", "src/render/render_module.cpp", "src/render/render_kernel_cpu.cpp"|' /tmp/extensions/DRTK/setup.py
     
     # 5. Patch cpu_atomic.h for C++17 compatibility (use reference instead of copy)
-    sed -i 's/auto target = detail::atomic_ref_at/async\& target = detail::atomic_ref_at/g' /tmp/extensions/DRTK/src/include/cpu_atomic.h
+    sed -i 's/auto target = detail::atomic_ref_at/auto\& target = detail::atomic_ref_at/g' /tmp/extensions/DRTK/src/include/cpu_atomic.h
     
     echo "[DRTK] Building DRTK (this may take a few minutes)..."
     pip install /tmp/extensions/DRTK --no-build-isolation
