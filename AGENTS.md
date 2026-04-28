@@ -18,6 +18,10 @@ Full setup (new conda env):
 
 Creates conda environment `trellis2` with PyTorch 2.6.0 + CUDA 12.4.
 
+For **inference-only** setups (no training, no Gradio UI), see:
+- `requirements-inference.txt` - Minimal pip requirements
+- `ENVIRONMENT.md` - Complete Docker/Vagrant reproduction guide
+
 For V100 or GPUs without flash-attn support: install `xformers` manually, then set `ATTN_BACKEND=xformers`.
 
 ## Entry Points
