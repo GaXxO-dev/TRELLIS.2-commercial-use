@@ -39,9 +39,13 @@
 # pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 
 # =============================================================================
-# STEP 5: Install prebuilt flash-attention wheel
+# STEP 5: Install prebuilt wheels
 # =============================================================================
+# flash-attention
 # pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+#
+# DRTK (prebuilt for CUDA 12.4, Python 3.10)
+# pip install https://github.com/GaXxO-dev/TRELLIS.2-commercial-use/releases/download/v0.1.0/drtk-0.1.0+cuda124-cp310-cp310-linux_x86_64.whl
 
 # =============================================================================
 # STEP 6: Build CUDA extensions (requires CUDA_HOME set)
@@ -102,37 +106,24 @@ RUN pip install --no-cache-dir -r requirements-inference.txt
 # Install git dependency
 RUN pip install --no-cache-dir git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 
-# Install flash-attention prebuilt wheel
+# Install prebuilt wheels
 RUN pip install --no-cache-dir https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+RUN pip install --no-cache-dir https://github.com/GaXxO-dev/TRELLIS.2-commercial-use/releases/download/v0.1.0/drtk-0.1.0+cuda124-cp310-cp310-linux_x86_64.whl
 
 # Copy project (for o-voxel)
 COPY . /app/
 
-# Build CUDA extensions - DRTK (with patches)
-RUN mkdir -p /tmp/extensions && \
-    git clone https://github.com/facebookresearch/DRTK.git /tmp/extensions/DRTK && \
-    sed -i 's|"src/interpolate/interpolate_kernel.cu",|"src/interpolate/interpolate_kernel.cu",\n                    "src/interpolate/interpolate_kernel_cpu.cpp",|' /tmp/extensions/DRTK/setup.py && \
-    sed -i 's|"src/rasterize/rasterize_kernel.cu",|"src/rasterize/rasterize_kernel.cu",\n                    "src/rasterize/rasterize_kernel_cpu.cpp",|' /tmp/extensions/DRTK/setup.py && \
-    sed -i 's|"src/edge_grad/edge_grad_kernel.cu",|"src/edge_grad/edge_grad_kernel.cu",\n                    "src/edge_grad/edge_grad_kernel_cpu.cpp",|' /tmp/extensions/DRTK/setup.py && \
-    sed -i 's|"src/render/render_kernel.cu", "src/render/render_module.cpp"|"src/render/render_kernel.cu", "src/render/render_module.cpp", "src/render/render_kernel_cpu.cpp"|' /tmp/extensions/DRTK/setup.py && \
-    sed -i 's/auto target = detail::atomic_ref_at/auto\& target = detail::atomic_ref_at/g' /tmp/extensions/DRTK/src/include/cpu_atomic.h && \
-    pip install setuptools==69.5.1 && \
-    pip install --no-cache-dir /tmp/extensions/DRTK --no-build-isolation && \
-    pip install setuptools==82.0.1
+# Build CUDA extensions (CuMesh, FlexGEMM, o-voxel)
+RUN git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/CuMesh --recursive && \
+    pip install --no-cache-dir /tmp/CuMesh --no-build-isolation
 
-# Build CuMesh
-RUN git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive && \
-    pip install --no-cache-dir /tmp/extensions/CuMesh --no-build-isolation
+RUN git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/FlexGEMM --recursive && \
+    pip install --no-cache-dir /tmp/FlexGEMM --no-build-isolation
 
-# Build FlexGEMM
-RUN git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM --recursive && \
-    pip install --no-cache-dir /tmp/extensions/FlexGEMM --no-build-isolation
-
-# Install o-voxel (editable)
 RUN pip install -e /app/o-voxel --no-build-isolation
 
 # Clean up
-RUN rm -rf /tmp/extensions /root/.cache/pip
+RUN rm -rf /tmp/CuMesh /tmp/FlexGEMM /root/.cache/pip
 
 # Verify
 RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}')" && \

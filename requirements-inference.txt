@@ -76,14 +76,15 @@ packaging==26.0
 # pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 
 # =============================================================================
+# PREBUILT WHEELS (install with pip install URL)
+# =============================================================================
+# DRTK - Differentiable renderer (prebuilt for CUDA 12.4, Python 3.10)
+# pip install https://github.com/GaXxO-dev/TRELLIS.2-commercial-use/releases/download/v0.1.0/drtk-0.1.0+cuda124-cp310-cp310-linux_x86_64.whl
+
+# =============================================================================
 # BUILT FROM SOURCE (CUDA extensions - requires CUDA Toolkit 12.4)
 # =============================================================================
 # These require CUDA_HOME to be set and nvcc available:
-#
-# DRTK (differentiable renderer):
-#   git clone https://github.com/facebookresearch/DRTK.git /tmp/DRTK
-#   # Apply patches for CPU kernels and C++17 compatibility
-#   pip install /tmp/DRTK --no-build-isolation
 #
 # CuMesh (CUDA mesh operations):
 #   git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/CuMesh --recursive
