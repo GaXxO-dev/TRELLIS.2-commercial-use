@@ -9,8 +9,14 @@ import trimesh.visual
 from flex_gemm.ops.grid_sample import grid_sample_3d
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'trellis2'))
-from utils.drtk_compat import RasterizeCudaContext, interpolate
+
+# Support both local development and pip-installed package
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'trellis2'))
+    from utils.drtk_compat import RasterizeCudaContext, interpolate
+except ImportError:
+    from trellis2.utils.drtk_compat import RasterizeCudaContext, interpolate
+
 import cumesh
 
 # Benchmark timing support
