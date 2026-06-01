@@ -369,6 +369,8 @@ def image_to_3d(
     tex_slat_guidance_rescale: float,
     tex_slat_sampling_steps: int,
     tex_slat_rescale_t: float,
+    enable_memory_efficient_ssao: bool,
+    ssao_downsample: int,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> str:
@@ -404,7 +406,11 @@ def image_to_3d(
     )
     mesh = outputs[0]
     mesh.simplify(16777216) # rasterizer vertex limit
-    images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
+    ssao_factor = int(ssao_downsample) if enable_memory_efficient_ssao else 1
+    images = render_utils.render_snapshot(
+        mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap,
+        ssao_downsample=ssao_factor,
+    )
     state = pack_state(latents)
     torch.cuda.empty_cache()
     
@@ -538,6 +544,13 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
             extension_webp = gr.Checkbox(label="Use WEBP GLB Extension", value=True)
+            enable_memory_efficient_ssao = gr.Checkbox(
+                label="Memory-efficient SSAO (recommended for 24GB GPUs)",
+                value=True,
+            )
+            ssao_downsample = gr.Slider(
+                2, 8, label="SSAO Downsample Factor", value=2, step=1,
+            )
             
             generate_btn = gr.Button("Generate")
                 
@@ -609,6 +622,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
+            enable_memory_efficient_ssao, ssao_downsample,
         ],
         outputs=[output_buf, preview_output],
     )

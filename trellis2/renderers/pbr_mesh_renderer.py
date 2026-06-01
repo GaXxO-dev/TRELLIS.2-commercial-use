@@ -131,6 +131,7 @@ def screen_space_ambient_occlusion(
     samples: int = 64,
     intensity: float = 1.0,
     seed: int = 42,
+    downsample: int = 1,
 ) -> torch.Tensor:
     """
     Screen space ambient occlusion (SSAO) - vectorized implementation.
@@ -144,20 +145,44 @@ def screen_space_ambient_occlusion(
         samples (int): number of samples to use for the SSAO kernel
         intensity (float): intensity of the SSAO effect
         seed (int): Random seed for deterministic SSAO sampling
+        downsample (int): spatial downsample factor for the SSAO buffer.
+            `1` = full resolution (default, original behavior). `2` or `4`
+            trades SSAO sharpness for a large memory reduction.
     Returns:
         (torch.Tensor): [H, W, 1] SSAO image
     """
     device = depth.device
     H, W, _ = depth.shape
-    
+
+    if downsample > 1:
+        Hd, Wd = max(1, H // downsample), max(1, W // downsample)
+        depth_ds = F.interpolate(
+            depth.permute(2, 0, 1).unsqueeze(0), size=(Hd, Wd),
+            mode='nearest'
+        ).squeeze(0).permute(1, 2, 0)
+        normal_ds = F.interpolate(
+            normal.permute(2, 0, 1).unsqueeze(0), size=(Hd, Wd),
+            mode='bilinear', align_corners=False
+        ).squeeze(0).permute(1, 2, 0)
+        f_occ = screen_space_ambient_occlusion(
+            depth_ds, normal_ds, perspective,
+            radius=radius, bias=bias, samples=samples,
+            intensity=intensity, seed=seed, downsample=1,
+        )
+        f_occ = F.interpolate(
+            f_occ.permute(2, 0, 1).unsqueeze(0), size=(H, W),
+            mode='bilinear', align_corners=False
+        ).squeeze(0).permute(1, 2, 0)
+        return f_occ
+
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    
+
     fx = perspective[0, 0]
     fy = perspective[1, 1]
     cx = perspective[0, 2]
     cy = perspective[1, 2]
-    
+
     y_grid, x_grid = torch.meshgrid(
         (torch.arange(H, device=device) + 0.5) / H * 2 - 1,
         (torch.arange(W, device=device) + 0.5) / W * 2 - 1,
@@ -166,40 +191,40 @@ def screen_space_ambient_occlusion(
     x_view = (x_grid.float() - cx) * depth[..., 0] / fx
     y_view = (y_grid.float() - cy) * depth[..., 0] / fy
     view_pos = torch.stack([x_view, y_view, depth[..., 0]], dim=-1)
-    
+
     depth_feat = depth.permute(2, 0, 1).unsqueeze(0)
-    
+
     rnd_vec = torch.randn(samples, H, W, 3, device=device)
     rnd_vec = F.normalize(rnd_vec, p=2, dim=-1)
-    
+
     normal_expanded = normal.unsqueeze(0)
     dot_val = (rnd_vec * normal_expanded).sum(dim=-1, keepdim=True)
     sample_dir = torch.sign(dot_val) * rnd_vec
-    
+
     scale = torch.rand(samples, H, W, 1, device=device)
     scale = scale * scale
-    
+
     view_pos_expanded = view_pos.unsqueeze(0)
     sample_pos = view_pos_expanded + sample_dir * radius * scale
     sample_z = sample_pos[..., 2]
-    
+
     z_safe = torch.clamp(sample_pos[..., 2], min=1e-5)
     proj_u = (sample_pos[..., 0] * fx / z_safe) + cx
     proj_v = (sample_pos[..., 1] * fy / z_safe) + cy
-    
+
     grid = torch.stack([proj_u, proj_v], dim=-1)
-    
+
     depth_expanded = depth_feat.expand(samples, -1, -1, -1)
     geo_z = F.grid_sample(depth_expanded, grid, mode='nearest', padding_mode='border')
     geo_z = geo_z.squeeze(1)
-    
+
     range_check = torch.abs(geo_z - sample_z) < radius
     is_occluded = (geo_z <= sample_z - bias) & range_check
-    
+
     occlusion = is_occluded.float().sum(dim=0)
     f_occ = occlusion / samples * intensity
     f_occ = torch.clamp(f_occ, 0.0, 1.0)
-    
+
     return f_occ.unsqueeze(-1)
 
 
@@ -240,6 +265,7 @@ class PbrMeshRenderer:
             "far": None,
             "ssaa": 1,
             "peel_layers": 4,
+            "ssao_downsample": 1,
         })
         self.rendering_options.update(rendering_options)
         self.glctx = RasterizeCudaContext(device=device)
@@ -496,7 +522,8 @@ class PbrMeshRenderer:
         # Official f_occ ≈ 0.232, fork f_occ ≈ 0.261 without adjustment
         # Adjustment factor: 0.232 / 0.261 ≈ 0.89
         f_occ = screen_space_ambient_occlusion(
-            depth, normal, perspective, intensity=1.33
+            depth, normal, perspective, intensity=1.33,
+            downsample=self.rendering_options.ssao_downsample,
         )
         shaded *= (1 - f_occ)
         out_dict.clay = (1 - f_occ)
