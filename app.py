@@ -595,16 +595,21 @@ def extract_glb(
     del shape_slat, tex_slat
     # Move all pipeline models to CPU to free VRAM for CuMesh
     pipeline_to_cpu()
-    # Move mesh data to CPU — to_glb will move it back to GPU as needed
-    mesh_vertices = mesh.vertices.cpu()
-    mesh_faces = mesh.faces.cpu()
-    mesh_attrs = mesh.attrs.cpu() if mesh.attrs is not None else None
-    mesh_coords = mesh.coords.cpu() if mesh.coords is not None else None
+    # Ensure mesh data is on CUDA for to_glb (it moves verts/faces to CUDA
+    # internally, but coords must match device for remeshing)
+    if hasattr(mesh, 'vertices') and mesh.vertices is not None:
+        mesh.vertices = mesh.vertices.cuda()
+    if hasattr(mesh, 'faces') and mesh.faces is not None:
+        mesh.faces = mesh.faces.cuda()
+    if hasattr(mesh, 'attrs') and mesh.attrs is not None:
+        mesh.attrs = mesh.attrs.cuda()
+    if hasattr(mesh, 'coords') and mesh.coords is not None:
+        mesh.coords = mesh.coords.cuda()
     glb = o_voxel.postprocess.to_glb(
-        vertices=mesh_vertices,
-        faces=mesh_faces,
-        attr_volume=mesh_attrs,
-        coords=mesh_coords,
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        attr_volume=mesh.attrs,
+        coords=mesh.coords,
         attr_layout=pipeline.pbr_attr_layout,
         grid_size=res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
@@ -620,7 +625,7 @@ def extract_glb(
     os.makedirs(user_dir, exist_ok=True)
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
     glb_utils.export_glb_fixed(glb, glb_path, extension_webp=extension_webp)
-    del mesh, mesh_vertices, mesh_faces, mesh_attrs, mesh_coords, glb
+    del mesh, glb
     cleanup_gpu()
     # Restore pipeline device for next generation (low_vram mode lazily
     # loads models to GPU per-stage, so just set the device flag)
