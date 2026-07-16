@@ -60,6 +60,14 @@ plyfile==1.1.3
 pygltflib==1.16.5
 
 # =============================================================================
+# OPTIONAL: Multi-View Enhancement (hole-filling 'remove_small_holes' algorithm)
+# =============================================================================
+# scikit-image>=0.24.0
+# Only needed if you select the 'remove_small_holes' hole-fill algorithm in the
+# Gradio Enhancement Settings. The 'morphological_closing' and 'flood_fill'
+# algorithms use scipy (already listed above) and require no extra dependency.
+
+# =============================================================================
 # UTILITIES
 # =============================================================================
 tqdm==4.67.3

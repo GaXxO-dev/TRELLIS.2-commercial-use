@@ -27,6 +27,7 @@ class SparseRotaryPositionEmbedder(nn.Module):
         return phases
         
     def _rotary_embedding(self, x: torch.Tensor, phases: torch.Tensor) -> torch.Tensor:
+        phases = phases.to(x.device)
         x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
         x_rotated = x_complex * phases.unsqueeze(-2)
         x_embed = torch.view_as_real(x_rotated).reshape(*x_rotated.shape[:-1], -1).to(x.dtype)

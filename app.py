@@ -331,7 +331,7 @@ def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
     shape_slat, tex_slat, res = latents
     return {
         'shape_slat_feats': shape_slat.feats.cpu().numpy(),
-        'tex_slat_feats': tex_slat.feats.cpu().numpy(),
+        'tex_slat_feats': tex_slat.feats.cpu().numpy() if tex_slat is not None else None,
         'coords': shape_slat.coords.cpu().numpy(),
         'res': res,
     }
@@ -342,7 +342,10 @@ def unpack_state(state: dict) -> Tuple[SparseTensor, SparseTensor, int]:
         feats=torch.from_numpy(state['shape_slat_feats']).cuda(),
         coords=torch.from_numpy(state['coords']).cuda(),
     )
-    tex_slat = shape_slat.replace(torch.from_numpy(state['tex_slat_feats']).cuda())
+    if state['tex_slat_feats'] is not None:
+        tex_slat = shape_slat.replace(torch.from_numpy(state['tex_slat_feats']).cuda())
+    else:
+        tex_slat = None
     return shape_slat, tex_slat, state['res']
 
 
@@ -354,7 +357,12 @@ def get_seed(randomize_seed: bool, seed: int) -> int:
 
 
 def image_to_3d(
+    input_mode: str,
     image: Image.Image,
+    front_image: Image.Image,
+    back_image: Image.Image,
+    left_image: Image.Image,
+    right_image: Image.Image,
     seed: int,
     resolution: str,
     ss_guidance_strength: float,
@@ -371,39 +379,86 @@ def image_to_3d(
     tex_slat_rescale_t: float,
     enable_memory_efficient_ssao: bool,
     ssao_downsample: int,
+    dino_lock: float,
+    dino_substeps: int,
+    dino_foundation_cap: float,
+    fill_holes: bool,
+    hole_fill_algorithm: str,
+    hole_structure: int,
+    hole_iterations: int,
+    keep_only_shell: bool,
+    front_axis: str,
+    blend_temperature: float,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> str:
-    # --- Sampling ---
-    outputs, latents = pipeline.run(
-        image,
-        seed=seed,
-        preprocess_image=False,
-        sparse_structure_sampler_params={
-            "steps": ss_sampling_steps,
-            "guidance_strength": ss_guidance_strength,
-            "guidance_rescale": ss_guidance_rescale,
-            "rescale_t": ss_rescale_t,
-        },
-        shape_slat_sampler_params={
-            "steps": shape_slat_sampling_steps,
-            "guidance_strength": shape_slat_guidance_strength,
-            "guidance_rescale": shape_slat_guidance_rescale,
-            "rescale_t": shape_slat_rescale_t,
-        },
-        tex_slat_sampler_params={
-            "steps": tex_slat_sampling_steps,
-            "guidance_strength": tex_slat_guidance_strength,
-            "guidance_rescale": tex_slat_guidance_rescale,
-            "rescale_t": tex_slat_rescale_t,
-        },
-        pipeline_type={
-            "512": "512",
-            "1024": "1024_cascade",
-            "1536": "1536_cascade",
-        }[resolution],
-        return_latent=True,
+    # --- Build common sampler params ---
+    ss_params = {
+        "steps": ss_sampling_steps,
+        "guidance_strength": ss_guidance_strength,
+        "guidance_rescale": ss_guidance_rescale,
+        "rescale_t": ss_rescale_t,
+    }
+    shape_params = {
+        "steps": shape_slat_sampling_steps,
+        "guidance_strength": shape_slat_guidance_strength,
+        "guidance_rescale": shape_slat_guidance_rescale,
+        "rescale_t": shape_slat_rescale_t,
+    }
+    tex_params = {
+        "steps": tex_slat_sampling_steps,
+        "guidance_strength": tex_slat_guidance_strength,
+        "guidance_rescale": tex_slat_guidance_rescale,
+        "rescale_t": tex_slat_rescale_t,
+    }
+    pipeline_type = {
+        "512": "512",
+        "1024": "1024_cascade",
+        "1536": "1536_cascade",
+    }[resolution]
+
+    # --- Enhancement kwargs shared by both paths ---
+    enhance_kwargs = dict(
+        dino_lock=dino_lock,
+        dino_substeps=dino_substeps,
+        dino_foundation_cap=dino_foundation_cap,
+        fill_holes=fill_holes,
+        hole_structure=hole_structure,
+        hole_iterations=hole_iterations,
+        hole_fill_algorithm=hole_fill_algorithm,
+        keep_only_shell=keep_only_shell,
     )
+
+    # --- Dispatch ---
+    if input_mode == "Single Image":
+        outputs, latents = pipeline.run(
+            image,
+            seed=seed,
+            preprocess_image=False,
+            sparse_structure_sampler_params=ss_params,
+            shape_slat_sampler_params=shape_params,
+            tex_slat_sampler_params=tex_params,
+            pipeline_type=pipeline_type,
+            return_latent=True,
+            **enhance_kwargs,
+        )
+    else:  # Multi-View
+        outputs, latents = pipeline.run_multiview(
+            front=front_image,
+            back=back_image,
+            left=left_image,
+            right=right_image,
+            seed=seed,
+            sparse_structure_sampler_params=ss_params,
+            shape_slat_sampler_params=shape_params,
+            tex_slat_sampler_params=tex_params,
+            pipeline_type=pipeline_type,
+            return_latent=True,
+            front_axis=front_axis,
+            blend_temperature=blend_temperature,
+            **enhance_kwargs,
+        )
+
     mesh = outputs[0]
     mesh.simplify(16777216) # rasterizer vertex limit
     ssao_factor = int(ssao_downsample) if enable_memory_efficient_ssao else 1
@@ -531,12 +586,31 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     gr.Markdown("""
     ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2)
     * Upload an image (preferably with an alpha-masked foreground object) and click Generate to create a 3D asset.
+    * Multi-View mode: upload front (required) + optional back/left/right views for higher-fidelity generation.
     * Click Extract GLB to export and download the generated GLB file if you're satisfied with the result. Otherwise, try another time.
     """)
     
     with gr.Row():
         with gr.Column(scale=1, min_width=360):
-            image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
+            # --- Input Mode Toggle ---
+            input_mode = gr.Radio(
+                ["Single Image", "Multi-View"],
+                label="Input Mode",
+                value="Single Image",
+            )
+
+            # --- Single Image Input ---
+            with gr.Column(visible=True) as single_image_col:
+                image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
+
+            # --- Multi-View Inputs ---
+            with gr.Column(visible=False) as multiview_col:
+                with gr.Row():
+                    front_image = gr.Image(label="Front (required)", format="png", image_mode="RGBA", type="pil", height=200)
+                    back_image = gr.Image(label="Back (optional)", format="png", image_mode="RGBA", type="pil", height=200)
+                with gr.Row():
+                    left_image = gr.Image(label="Left (optional)", format="png", image_mode="RGBA", type="pil", height=200)
+                    right_image = gr.Image(label="Right (optional)", format="png", image_mode="RGBA", type="pil", height=200)
             
             resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
@@ -574,6 +648,30 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     tex_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)                
 
+            with gr.Accordion(label="Enhancement Settings", open=False):
+                gr.Markdown(
+                    "Quality-enhancement features ported from the ComfyUI-Trellis2 community project. "
+                    "All are optional and disabled by default."
+                )
+                gr.Markdown("DINO-Lock (faithfulness to input image(s))")
+                dino_lock = gr.Slider(0.0, 1.0, value=0.0, step=0.05, label="DINO-Lock Strength (0 = disabled)")
+                dino_substeps = gr.Slider(1, 8, value=4, step=1, label="DINO-Lock Substeps")
+                dino_foundation_cap = gr.Slider(0.0, 1.0, value=0.92, step=0.01, label="DINO Foundation Cap")
+
+                gr.Markdown("Hole Filling (sparse structure post-processing)")
+                fill_holes = gr.Checkbox(value=False, label="Enable Hole Filling")
+                hole_fill_algorithm = gr.Radio(
+                    ["morphological_closing", "flood_fill", "remove_small_holes"],
+                    value="flood_fill", label="Hole Fill Algorithm",
+                )
+                hole_structure = gr.Slider(1, 5, value=1, step=1, label="Hole Structure Size")
+                hole_iterations = gr.Slider(1, 5, value=1, step=1, label="Hole Fill Iterations")
+                keep_only_shell = gr.Checkbox(value=False, label="Keep Only Shell (hollow interior)")
+
+                gr.Markdown("Multi-View Blending (only used in Multi-View mode)")
+                front_axis = gr.Radio(["z", "x"], value="z", label="Front Axis")
+                blend_temperature = gr.Slider(0.5, 5.0, value=2.0, step=0.1, label="Blend Temperature")
+
         with gr.Column(scale=10):
             with gr.Walkthrough(selected=0) as walkthrough:
                 with gr.Step("Preview", id=0):
@@ -602,12 +700,32 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     # Handlers
     demo.load(start_session)
     demo.unload(end_session)
+
+    # --- Mode toggle visibility ---
+    def toggle_mode(mode):
+        if mode == "Single Image":
+            return gr.Column(visible=True), gr.Column(visible=False)
+        else:
+            return gr.Column(visible=False), gr.Column(visible=True)
+
+    input_mode.change(
+        toggle_mode,
+        inputs=[input_mode],
+        outputs=[single_image_col, multiview_col],
+    )
     
+    # --- Preprocess on upload (single image) ---
     image_prompt.upload(
         preprocess_image,
         inputs=[image_prompt],
         outputs=[image_prompt],
     )
+
+    # --- Preprocess on upload (multi-view) ---
+    front_image.upload(preprocess_image, inputs=[front_image], outputs=[front_image])
+    back_image.upload(preprocess_image, inputs=[back_image], outputs=[back_image])
+    left_image.upload(preprocess_image, inputs=[left_image], outputs=[left_image])
+    right_image.upload(preprocess_image, inputs=[right_image], outputs=[right_image])
 
     generate_btn.click(
         get_seed,
@@ -618,11 +736,16 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         image_to_3d,
         inputs=[
-            image_prompt, seed, resolution,
+            input_mode,
+            image_prompt, front_image, back_image, left_image, right_image,
+            seed, resolution,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
             enable_memory_efficient_ssao, ssao_downsample,
+            dino_lock, dino_substeps, dino_foundation_cap,
+            fill_holes, hole_fill_algorithm, hole_structure, hole_iterations, keep_only_shell,
+            front_axis, blend_temperature,
         ],
         outputs=[output_buf, preview_output],
     )
