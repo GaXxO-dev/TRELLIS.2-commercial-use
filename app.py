@@ -323,6 +323,29 @@ def cleanup_gpu():
         torch.cuda.empty_cache()
 
 
+def pipeline_to_cpu():
+    """Move all pipeline models to CPU to free VRAM."""
+    if not hasattr(pipeline, 'models'):
+        return
+    for name, model in pipeline.models.items():
+        if model is not None and hasattr(model, 'cpu'):
+            try:
+                model.cpu()
+            except Exception:
+                pass
+    if pipeline.image_cond_model is not None:
+        try:
+            pipeline.image_cond_model.cpu()
+        except Exception:
+            pass
+    if pipeline.rembg_model is not None:
+        try:
+            pipeline.rembg_model.cpu()
+        except Exception:
+            pass
+    cleanup_gpu()
+
+
 def preprocess_image(image: Image.Image) -> Image.Image:
     """
     Preprocess the input image.
@@ -568,14 +591,20 @@ def extract_glb(
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     shape_slat, tex_slat, res = unpack_state(state)
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
-    # Free latent tensors + decoder GPU memory before CuMesh decimation
+    # Free latent tensors
     del shape_slat, tex_slat
-    cleanup_gpu()
+    # Move all pipeline models to CPU to free VRAM for CuMesh
+    pipeline_to_cpu()
+    # Move mesh data to CPU — to_glb will move it back to GPU as needed
+    mesh_vertices = mesh.vertices.cpu()
+    mesh_faces = mesh.faces.cpu()
+    mesh_attrs = mesh.attrs.cpu() if mesh.attrs is not None else None
+    mesh_coords = mesh.coords.cpu() if mesh.coords is not None else None
     glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
+        vertices=mesh_vertices,
+        faces=mesh_faces,
+        attr_volume=mesh_attrs,
+        coords=mesh_coords,
         attr_layout=pipeline.pbr_attr_layout,
         grid_size=res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
@@ -591,8 +620,12 @@ def extract_glb(
     os.makedirs(user_dir, exist_ok=True)
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
     glb_utils.export_glb_fixed(glb, glb_path, extension_webp=extension_webp)
-    del mesh, glb
+    del mesh, mesh_vertices, mesh_faces, mesh_attrs, mesh_coords, glb
     cleanup_gpu()
+    # Restore pipeline device for next generation (low_vram mode lazily
+    # loads models to GPU per-stage, so just set the device flag)
+    if torch.cuda.is_available():
+        pipeline._device = torch.device("cuda")
     return glb_path, glb_path
 
 
