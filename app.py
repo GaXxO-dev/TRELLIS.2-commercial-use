@@ -3,6 +3,8 @@ warnings.filterwarnings("ignore", message="Importing from timm.models.layers is 
 warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated")
 warnings.filterwarnings("ignore", message="`torch.cuda.amp.autocast")
 
+import gc
+
 import gradio as gr
 
 import os
@@ -313,6 +315,14 @@ def end_session(req: gr.Request):
     shutil.rmtree(user_dir)
 
 
+def cleanup_gpu():
+    """Aggressively free GPU memory: GC + sync + empty cache."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+
 def preprocess_image(image: Image.Image) -> Image.Image:
     """
     Preprocess the input image.
@@ -467,7 +477,7 @@ def image_to_3d(
         ssao_downsample=ssao_factor,
     )
     state = pack_state(latents)
-    torch.cuda.empty_cache()
+    cleanup_gpu()
     
     # --- HTML Construction ---
     # The Stack of 48 Images
@@ -558,6 +568,9 @@ def extract_glb(
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     shape_slat, tex_slat, res = unpack_state(state)
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
+    # Free latent tensors + decoder GPU memory before CuMesh decimation
+    del shape_slat, tex_slat
+    cleanup_gpu()
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices,
         faces=mesh.faces,
@@ -578,7 +591,8 @@ def extract_glb(
     os.makedirs(user_dir, exist_ok=True)
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
     glb_utils.export_glb_fixed(glb, glb_path, extension_webp=extension_webp)
-    torch.cuda.empty_cache()
+    del mesh, glb
+    cleanup_gpu()
     return glb_path, glb_path
 
 
